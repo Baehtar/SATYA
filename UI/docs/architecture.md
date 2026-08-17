@@ -32,7 +32,7 @@ graph TD
 
     Server --> MLS[services/ml_service.py]
 
-    MLS -->|voice| STT[services/audio/transcribe.py<br/>Gemini speech-to-text]
+    MLS -->|voice| STT[services/audio/transcribe.py<br/>Whisper STT, Gemini fallback]
     STT --> TextPipe
     MLS -->|image| AIDet[HF Inference API<br/>Organika/sdxl-detector]
     MLS -->|image| OCR[services/ocr<br/>Gemini Vision + tesseract fallback]
