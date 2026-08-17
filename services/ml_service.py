@@ -144,15 +144,37 @@ async def check_image_ai(image_path: str):
     }
 
 
-async def check_image(image_path: str, progress_callback=None):
+async def check_image(image_path: str, progress_callback=None, mode: str = None):
     """
-    FULL TARGET FLOW: Image → Existing AI Detector + Multilingual OCR → Claim Extraction → Fact Check Search → NLI Aggregation.
+    FULL TARGET FLOW with Mode Selection Support:
+    - mode="ai_image": Dedicated AI visual detector report (SDXL / Midjourney / DALL-E).
+    - mode="fake_news" / "extract_image": Dedicated OCR text extraction & news claim verification.
+    - mode=None: Full combined pipeline (AI Image Detector + OCR Claim Verification).
     """
-    print(f"IMAGE PROCESSOR ACTIVATED: {image_path}")
+    print(f"IMAGE PROCESSOR ACTIVATED (Mode={mode}): {image_path}")
 
-    # Step 1: Run Existing AI Detector & OCR in parallel
+    # Mode 3: Dedicated AI Image Detection
+    if mode == "ai_image":
+        if progress_callback:
+            await progress_callback("🤖 Running AI Image Authenticity Detection (SDXL/Midjourney)...")
+        ai_res = await check_image_ai(image_path)
+        image_ai_score = float(ai_res.get("artificial_score", 0.0))
+
+        if progress_callback:
+            await progress_callback("✅ AI visual inspection complete.")
+
+        return {
+            "type": "image",
+            "verdict": ai_res.get("verdict", "UNVERIFIABLE"),
+            "confidence": ai_res.get("confidence", 0.0),
+            "image_ai_score": image_ai_score,
+            "explanation": f"🤖 <b>AI Image Detection Result:</b>\n\n{ai_res.get('explanation', '')}",
+            "sources": []
+        }
+
+    # Mode 1 & 2 / Combined Flow
     if progress_callback:
-        await progress_callback("🔍 Reading image & running AI authenticity check...")
+        await progress_callback("🔍 Reading image & running analysis...")
 
     ai_task = check_image_ai(image_path)
 
