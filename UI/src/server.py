@@ -141,6 +141,13 @@ async def health() -> Dict[str, Any]:
         "stt_engine": settings.stt_engine,                      # voice-note speech-to-text
         "whisper_configured": whisper_stt.is_configured(),
         "whisper_model": whisper_config[2] if whisper_config else None,
+        # Reverse image search. Vision reads local files; Lens additionally needs
+        # a public image URL, so it is usually off — see services/image/serpapi_lens.py.
+        "reverse_search_enabled": settings.reverse_search_enabled,
+        "google_vision_configured": bool(settings.google_vision_api_key),
+        "serpapi_lens_configured": bool(settings.serpapi_key) and bool(
+            settings.public_image_base_url or settings.serpapi_lens_allow_upload
+        ),
     }
 
 

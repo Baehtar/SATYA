@@ -47,17 +47,31 @@ async def run_image_pipeline(request: CheckRequest) -> ImageAnalysis:
         )
 
     # Merge results, gracefully handling partial failures
+    ai = ai_result if not isinstance(ai_result, Exception) else {}
+    manip = manip_result if not isinstance(manip_result, Exception) else {}
+    reverse = reverse_result if not isinstance(reverse_result, Exception) else {}
+    provenance = reverse.get("provenance") or {}
+    forensics = provenance.get("forensics") or {}
+
     analysis = ImageAnalysis(
-        ai_generation_score=ai_result.get("score", 0.0) if not isinstance(ai_result, Exception) else 0.0,
-        ai_generation_model_used=ai_result.get("model", "") if not isinstance(ai_result, Exception) else "",
-        manipulation_score=manip_result.get("score", 0.0) if not isinstance(manip_result, Exception) else 0.0,
-        ela_heatmap_path=manip_result.get("heatmap_path") if not isinstance(manip_result, Exception) else None,
-        exif_anomalies=manip_result.get("exif_anomalies", []) if not isinstance(manip_result, Exception) else [],
-        noise_inconsistency=manip_result.get("noise_inconsistency", 0.0) if not isinstance(manip_result, Exception) else 0.0,
-        reverse_search_results=reverse_result.get("results", []) if not isinstance(reverse_result, Exception) else [],
-        earliest_appearance_date=reverse_result.get("earliest_date") if not isinstance(reverse_result, Exception) else None,
-        recycled_image=reverse_result.get("recycled", False) if not isinstance(reverse_result, Exception) else False,
-        recycled_confidence=reverse_result.get("recycled_confidence", 0.0) if not isinstance(reverse_result, Exception) else 0.0,
+        ai_generation_score=ai.get("score", 0.0),
+        ai_generation_model_used=ai.get("model", ""),
+        manipulation_score=manip.get("score", 0.0),
+        ela_heatmap_path=manip.get("heatmap_path"),
+        exif_anomalies=manip.get("exif_anomalies", []),
+        noise_inconsistency=manip.get("noise_inconsistency", 0.0),
+        # Copy-move and resampling come from the provenance engine's forensics,
+        # which runs the signals the standalone manipulation detector lacks.
+        copy_move_score=forensics.get("copy_move_score", 0.0),
+        resampling_score=forensics.get("resampling_score", 0.0),
+        image_hash=provenance.get("image_hash", ""),
+        phash=provenance.get("phash", ""),
+        reverse_search_results=reverse.get("results", []),
+        earliest_appearance_date=reverse.get("earliest_date"),
+        image_status=provenance.get("image_status", ""),
+        provenance_searched=bool(provenance.get("searched")),
+        recycled_image=reverse.get("recycled", False),
+        recycled_confidence=reverse.get("recycled_confidence", 0.0),
         pipeline_latency_ms=int((time.monotonic() - start) * 1000),
         error="; ".join(str(e) for e in [ai_result, manip_result, reverse_result] if isinstance(e, Exception)) or None,
     )

@@ -146,12 +146,127 @@ async def check_image_ai(image_path: str):
     }
 
 
-async def check_image(image_path: str, progress_callback=None, mode: str = None):
+async def run_provenance(image_path: str, claim_text: str = "", ai_score: float = None, progress_callback=None):
+    """
+    Reverse Image Engine — where has this picture been before?
+
+    Wrapped in a hard timeout: it calls two search providers and then fetches
+    the matching pages, so a single slow publisher must never hold up a
+    Telegram reply. A timeout degrades to "unavailable", which the renderer
+    reports honestly rather than as "no earlier copies found".
+    """
+    from src.config import settings
+    from services.image import reverse_image_check
+
+    if not settings.reverse_search_enabled:
+        return None
+
+    if progress_callback:
+        await progress_callback("🌐 Checking where this image has appeared before…", "image_analysis")
+
+    try:
+        return await asyncio.wait_for(
+            reverse_image_check(
+                image_path,
+                claim_text=claim_text,
+                ai_generated_score=ai_score,
+            ),
+            timeout=settings.image_pipeline_timeout,
+        )
+    except asyncio.TimeoutError:
+        print("Provenance check timed out")
+        return {
+            "image_status": "SEARCH_UNAVAILABLE",
+            "searched": False,
+            "ai_generated_score": ai_score,
+            "notes": ["The provenance check timed out before it finished."],
+            "reverse_matches": [],
+            "forensics": {},
+            "date_analysis": {},
+        }
+    except Exception as e:
+        print(f"Provenance check failed: {e}")
+        return None
+
+
+def _with_provenance(explanation: str, provenance: dict) -> str:
+    """
+    Appends the IMAGE ANALYSIS block to a claim explanation.
+
+    The two stay visually separate on purpose: provenance describes the
+    photograph, the claim verdict describes the sentence. An old photo does not
+    make a statement false, and a true statement does not make the photo recent.
+    """
+    if not provenance:
+        return explanation
+
+    from services.image import render_image_analysis
+
+    forensics_signals = (provenance.get("forensics") or {}).get("signals") or []
+    if not provenance.get("searched") and not forensics_signals:
+        return explanation
+
+    block = render_image_analysis(provenance)
+    return f"{explanation}\n\n━━━━━━━━━━\n{block}" if block else explanation
+
+
+def apply_provenance_fusion(verdict: str, confidence: float, provenance: dict):
+    """
+    Lets a recycled image change the MESSAGE-level verdict — but only when the
+    message actually made a dated assertion for the photograph to contradict.
+
+    The distinction is the whole point of the engine. If someone sends an old
+    photo with no date attached, the photo being old proves nothing; it may be a
+    file photo, perfectly legitimately. It is the combination of "this shows
+    yesterday's cyclone" with "this photo was published in 2018" that is false —
+    and even then, what's false is the framing, not necessarily the photograph.
+
+    Returns (verdict, confidence, note). A claim already debunked on its own
+    evidence is left alone; nothing here ever flips a verdict to LIKELY_TRUE.
+    """
+    if not provenance or provenance.get("image_status") != "RECYCLED":
+        return verdict, confidence, ""
+
+    prov_confidence = float(provenance.get("status_confidence") or 0.0)
+    date_analysis = provenance.get("date_analysis") or {}
+    # "caller"/"explicit_date"/"relative_term" mean a date was actually asserted.
+    # Falling back to "now" (comparison_basis=message_received) does not count.
+    asserted_date = (
+        date_analysis.get("claim_date_method") in ("caller", "explicit_date", "relative_term")
+        and date_analysis.get("comparison_basis") == "claim_date"
+    )
+
+    if not asserted_date or prov_confidence < 0.55:
+        return verdict, confidence, ""
+
+    note = (
+        "🔁 <b>The image does not show the event described.</b> It was already "
+        "online well before the date claimed for it. The photograph itself may be "
+        "genuine — it is the context around it that is wrong."
+    )
+
+    if verdict == "LIKELY_FALSE":
+        return verdict, max(confidence, prov_confidence), note
+    if verdict == "LIKELY_TRUE":
+        # The words check out but the picture is borrowed — say exactly that.
+        return verdict, confidence, note
+    return "LIKELY_FALSE", prov_confidence, note
+
+
+async def check_image(image_path: str, progress_callback=None, mode: str = None, caption: str = ""):
     """
     FULL TARGET FLOW with Mode Selection Support:
     - mode="ai_image": Dedicated AI visual detector report (SDXL / Midjourney / DALL-E).
     - mode="fake_news" / "extract_image": Dedicated OCR text extraction & news claim verification.
     - mode=None: Full combined pipeline (AI Image Detector + OCR Claim Verification).
+
+    Every mode also runs the Reverse Image Engine (services/image) for
+    provenance: AI-generation score, local forensics and reverse search answer
+    three different questions and are reported separately.
+
+    `caption` is the message text sent alongside the image — the usual home of
+    the date being claimed ("yesterday's flood in Bihar"), which is what the
+    earliest located appearance gets compared against.
 
     progress_callback(message: str, step: str) — optional async hook for streaming UIs.
     """
@@ -164,6 +279,13 @@ async def check_image(image_path: str, progress_callback=None, mode: str = None)
         ai_res = await check_image_ai(image_path)
         image_ai_score = float(ai_res.get("artificial_score", 0.0))
 
+        # Provenance still matters here: a real photograph reused out of context
+        # is the commonest fake, and it scores 0% on an AI detector.
+        provenance = await run_provenance(
+            image_path, claim_text=caption, ai_score=image_ai_score,
+            progress_callback=progress_callback,
+        )
+
         if progress_callback:
             await progress_callback("✅ AI visual inspection complete.", "image_analysis")
 
@@ -172,7 +294,11 @@ async def check_image(image_path: str, progress_callback=None, mode: str = None)
             "verdict": ai_res.get("verdict", "UNVERIFIABLE"),
             "confidence": ai_res.get("confidence", 0.0),
             "image_ai_score": image_ai_score,
-            "explanation": f"🤖 <b>AI Image Detection Result:</b>\n\n{ai_res.get('explanation', '')}",
+            "explanation": _with_provenance(
+                f"🤖 <b>AI Image Detection Result:</b>\n\n{ai_res.get('explanation', '')}",
+                provenance,
+            ),
+            "provenance": provenance,
             "sources": []
         }
 
@@ -189,16 +315,30 @@ async def check_image(image_path: str, progress_callback=None, mode: str = None)
     ai_res = await ai_task
     image_ai_score = float(ai_res.get("artificial_score", 0.0))
 
+    # The date being claimed lives in the caption if there is one, otherwise in
+    # the text printed on the image itself.
+    claim_text = caption or ocr_meta.get("cleaned_text", "")
+    provenance_task = asyncio.create_task(
+        run_provenance(image_path, claim_text=claim_text, ai_score=image_ai_score,
+                       progress_callback=progress_callback)
+    )
+
     # Step 2: Check if OCR found readable text in image
     if not ocr_meta.get("has_readable_text"):
+        provenance = await provenance_task
         if progress_callback:
-            await progress_callback("✅ No readable text in the image — visual AI report ready.", "image_analysis")
+            await progress_callback("✅ No readable text in the image — visual report ready.", "image_analysis")
         return {
             "type": "image",
             "verdict": ai_res.get("verdict", "UNVERIFIABLE"),
             "confidence": ai_res.get("confidence", 0.0),
             "image_ai_score": image_ai_score,
-            "explanation": f"<b>Image Authenticity:</b> {ai_res.get('explanation', '')}\n\n<i>Note: No legible news headline/text was found in this image for fact-check search.</i>",
+            "explanation": _with_provenance(
+                f"<b>Image Authenticity:</b> {ai_res.get('explanation', '')}\n\n"
+                f"<i>Note: No legible news headline/text was found in this image for fact-check search.</i>",
+                provenance,
+            ),
+            "provenance": provenance,
             "sources": [],
             "ocr": ocr_meta
         }
@@ -217,7 +357,12 @@ async def check_image(image_path: str, progress_callback=None, mode: str = None)
         text_content=ocr_meta.get("cleaned_text", "")
     )
 
-    text_analysis = await run_text_pipeline(req, progress_callback=progress_callback)
+    # Claim verification and provenance are independent questions — run them
+    # concurrently rather than making the user wait for one then the other.
+    text_analysis, provenance = await asyncio.gather(
+        run_text_pipeline(req, progress_callback=progress_callback),
+        provenance_task,
+    )
 
     # Step 4: Aggregate Evidence & Fuse Image AI + Claim NLI Signals
     fused_res = aggregate_evidence(text_analysis, image_ai_score, ocr_meta)
@@ -251,6 +396,12 @@ async def check_image(image_path: str, progress_callback=None, mode: str = None)
             f"🖼️ <b>Image Note:</b> {fused_res.get('image_note', '')}"
         )
 
+    verdict_val, conf_score, provenance_note = apply_provenance_fusion(
+        verdict_val, conf_score, provenance
+    )
+    if provenance_note:
+        explanation = f"{explanation}\n\n{provenance_note}"
+
     if progress_callback:
         await progress_callback("✅ Analysis complete.", "generating_verdict")
 
@@ -260,8 +411,9 @@ async def check_image(image_path: str, progress_callback=None, mode: str = None)
         "confidence": conf_score,
         "confidence_level": conf_level,
         "extracted_claim": extracted_claim,
-        "explanation": explanation,
+        "explanation": _with_provenance(explanation, provenance),
         "image_ai_score": image_ai_score,
+        "provenance": provenance,
         "sources": sources,
         "ocr": ocr_meta
     }
@@ -319,7 +471,9 @@ async def check_mixed(image_path: str, caption: str, progress_callback=None):
     Performs Evidence Fusion (Section 2 & 16 of fake_news_workflow.md):
     - Image AI score is an image authenticity signal, NOT proof that text claim is false!
     """
-    image_task = check_image(image_path, progress_callback=progress_callback)
+    # The caption goes to the image check too: it is where the claimed date
+    # usually lives, and the provenance engine needs it to compare against.
+    image_task = check_image(image_path, progress_callback=progress_callback, caption=caption)
     text_task = check_text(caption, progress_callback=progress_callback) if caption else None
 
     if text_task:
@@ -378,6 +532,16 @@ async def check_mixed(image_path: str, caption: str, progress_callback=None):
             f"We could not find enough independent fact-checks for this claim in PIB, Alt News, or BOOM archives."
         )
 
+    # Fusion Rule 5: provenance. A photograph that was already online before the
+    # date the caption claims for it is evidence about the message even when the
+    # fact-check archives have nothing on the claim itself.
+    provenance = image_result.get("provenance")
+    fused_verdict, fused_confidence, provenance_note = apply_provenance_fusion(
+        fused_verdict, fused_confidence, provenance
+    )
+    if provenance_note:
+        fused_explanation = f"{fused_explanation}\n\n{provenance_note}"
+
     return {
         "type": "mixed",
         "verdict": fused_verdict,
@@ -385,5 +549,7 @@ async def check_mixed(image_path: str, caption: str, progress_callback=None):
         "explanation": fused_explanation,
         "image": image_result,
         "text": text_result,
+        "provenance": provenance,
+        "image_ai_score": image_result.get("image_ai_score", 0.0),
         "sources": sources,
     }
