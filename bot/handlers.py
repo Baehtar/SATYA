@@ -35,22 +35,46 @@ async def start(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
+    """Welcome message asking what analysis needs to be done with interactive options."""
+    welcome_text = (
+        "🛡️ <b>Welcome to Satya — AI News & Media Fact-Checker</b>\n\n"
+        "What analysis would you like to perform?\n\n"
+        "1️⃣ <b>Fake Text News Analysis</b>\n"
+        "<i>Verify written news claims, viral messages, or forwards.</i>\n\n"
+        "2️⃣ <b>Extract News from Image</b>\n"
+        "<i>OCR extract text from news clippings/screenshots & fact-check.</i>\n\n"
+        "3️⃣ <b>Check AI-Generated Image</b>\n"
+        "<i>Detect if an image is AI-generated (SDXL/Midjourney) or authentic.</i>\n\n"
+        "👇 <b>Select an option below or send your content directly:</b>"
+    )
 
-    text = (
-        "🛡️ <b>Welcome to Satya</b>\n\n"
-        "I am an AI forward-checker.\n\n"
-        "Send or forward me:\n"
-        "• 📝 Suspicious text\n"
-        "• 🖼️ Images\n"
-        "• 🖼️ Images with captions\n"
-        "• 🎙️ Voice notes\n\n"
-        "I'll analyse the content and "
-        "give you a credibility assessment."
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "💬 1. Fake Text News Analysis",
+                    callback_data="mode_text_news"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "📰 2. Extract News from Image",
+                    callback_data="mode_extract_image"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "🤖 3. Check AI-Generated Image",
+                    callback_data="mode_ai_image"
+                )
+            ]
+        ]
     )
 
     await update.message.reply_text(
-        text,
-        parse_mode="HTML"
+        welcome_text,
+        parse_mode="HTML",
+        reply_markup=keyboard
     )
 
 
@@ -58,22 +82,16 @@ async def help_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
-
-    text = (
-        "📖 <b>How to use Satya</b>\n\n"
-        "Simply forward suspicious content "
-        "to this bot.\n\n"
-        "Supported:\n"
-        "📝 Text\n"
-        "🖼️ Images\n"
-        "🖼️ Image + caption\n"
-        "🎙️ Voice notes\n\n"
-        "Satya will return a verdict with "
-        "a confidence level and sources."
+    help_text = (
+        "📖 <b>Satya Analysis Modes Guide</b>\n\n"
+        "1️⃣ <b>Text Analysis:</b> Send any text claim to check against PIB, Alt News, BOOM & Google News.\n"
+        "2️⃣ <b>Extract News from Image:</b> Send newspaper clips, social media graphics or screenshots to extract text & verify news claims.\n"
+        "3️⃣ <b>AI Image Detection:</b> Send photos to detect synthetic/AI generation.\n\n"
+        "Use /start to reset options anytime."
     )
 
     await update.message.reply_text(
-        text,
+        help_text,
         parse_mode="HTML"
     )
 
@@ -136,9 +154,12 @@ async def handle_message(
                 context.bot
             )
 
+            selected_mode = context.user_data.get("selected_mode")
+
             result = await check_image(
                 image_path,
-                progress_callback=progress_cb
+                progress_callback=progress_cb,
+                mode=selected_mode
             )
 
         # -----------------------------
@@ -226,27 +247,46 @@ async def button_handler(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
-
     query = update.callback_query
-
     await query.answer()
 
-    if query.data == "sources":
+    if query.data == "mode_text_news":
+        context.user_data["selected_mode"] = "text_news"
+        await query.message.reply_text(
+            "💬 <b>Option 1 Selected: Fake Text News Analysis</b>\n\n"
+            "Please send or forward the written news claim, rumor, or article text you want to verify.",
+            parse_mode="HTML"
+        )
 
+    elif query.data == "mode_extract_image":
+        context.user_data["selected_mode"] = "extract_image"
+        await query.message.reply_text(
+            "📰 <b>Option 2 Selected: Extract News from Image</b>\n\n"
+            "Please upload the newspaper clipping, tweet screenshot, WhatsApp forward image, or news chyron graphic.",
+            parse_mode="HTML"
+        )
+
+    elif query.data == "mode_ai_image":
+        context.user_data["selected_mode"] = "ai_image"
+        await query.message.reply_text(
+            "🤖 <b>Option 3 Selected: Check AI-Generated Image</b>\n\n"
+            "Please upload the photo or image you want to test for AI visual generation (SDXL / Midjourney / DALL-E).",
+            parse_mode="HTML"
+        )
+
+    elif query.data == "sources":
         await query.message.reply_text(
             "📎 <b>Fact-Check Sources Evaluated:</b>\n"
             "• <b>PIB Fact Check:</b> Government of India claims\n"
             "• <b>Alt News:</b> Viral claims & social media misinformation\n"
             "• <b>BOOM Live:</b> Misinformation & deepfake verifications\n"
-            "• <b>Google Fact Check API:</b> ClaimReview global index",
+            "• <b>Google News & Fact Check API:</b> Live global index",
             parse_mode="HTML"
         )
 
     elif query.data == "report":
-
         await query.message.reply_text(
-            "⚠️ Thank you! Your error report has been recorded "
-            "for continuous model calibration.",
+            "⚠️ Thank you! Your error report has been recorded for model calibration.",
             parse_mode="HTML"
         )
 
