@@ -108,36 +108,19 @@ def _run_noise_analysis(image_path: str) -> float:
     """
     Detects noise inconsistency across image regions (splicing indicator).
     Returns a score 0–1 where high = inconsistent noise (likely spliced).
+
+    Delegates to services/image/image_forensics.py, which does the same
+    Laplacian-variance analysis in pure numpy. The original implementation here
+    imported scipy.signal.convolve2d inside the per-block loop; scipy is not in
+    requirements.txt, so wherever it was absent the except clause swallowed the
+    ImportError and this always returned 0.0.
     """
     try:
-        image = Image.open(image_path).convert("L")  # grayscale
-        img_array = np.array(image, dtype=np.float32)
+        from services.image.image_forensics import (
+            NOISE_MAX_DIM, _load_grey_native, noise_inconsistency,
+        )
 
-        # Divide into blocks and compute local noise variance
-        block_size = 64
-        h, w = img_array.shape
-        variances = []
-
-        for y in range(0, h - block_size, block_size):
-            for x in range(0, w - block_size, block_size):
-                block = img_array[y:y+block_size, x:x+block_size]
-                # High-frequency noise via Laplacian
-                laplacian = np.array([
-                    [0, -1, 0], [-1, 4, -1], [0, -1, 0]
-                ])
-                from scipy.signal import convolve2d
-                noise = convolve2d(block, laplacian, mode='valid')
-                variances.append(np.var(noise))
-
-        if not variances:
-            return 0.0
-
-        variances = np.array(variances)
-        # High coefficient of variation → inconsistent noise → splicing
-        cv = np.std(variances) / (np.mean(variances) + 1e-8)
-        score = min(1.0, cv / 5.0)  # normalise
-
-        return float(score)
+        return noise_inconsistency(_load_grey_native(image_path, NOISE_MAX_DIM))
 
     except Exception as e:
         log.warning("noise_analysis_failed", error=str(e))

@@ -179,6 +179,8 @@ class ReverseImageResult(BaseModel):
     snippet: str = ""
     date_published: Optional[str] = None
     source_domain: str = ""
+    match_type: str = ""                    # EXACT / FULL / PARTIAL / *_VISUAL_SIMILARITY
+    date_confidence: float = 0.0            # how much to trust date_published
 
 
 class ImageAnalysis(BaseModel):
@@ -186,13 +188,23 @@ class ImageAnalysis(BaseModel):
     ai_generation_score: float = 0.0        # 0 = camera photo, 1 = synthetic
     ai_generation_model_used: str = ""
 
-    manipulation_score: float = 0.0         # ELA + EXIF + noise, weighted
+    manipulation_score: float = 0.0         # ELA + EXIF + noise + copy-move, weighted
     ela_heatmap_path: Optional[str] = None
     exif_anomalies: list[str] = Field(default_factory=list)
     noise_inconsistency: float = 0.0
+    copy_move_score: float = 0.0            # a region duplicated within the frame
+    resampling_score: float = 0.0           # resize/rotate artefacts
+
+    # Identity of the original file, computed before any analysis touches it.
+    image_hash: str = ""                    # SHA-256
+    phash: str = ""                         # perceptual hash
 
     reverse_search_results: list[ReverseImageResult] = Field(default_factory=list)
+    # "Earliest LOCATED appearance" — the oldest copy our providers indexed, which
+    # is not a claim about when the photograph was actually first published.
     earliest_appearance_date: Optional[str] = None
+    image_status: str = ""                  # RECYCLED / CONTEMPORANEOUS / NO_MATCHES_LOCATED / …
+    provenance_searched: bool = False       # False = no provider ran; NOT "nothing found"
     recycled_image: bool = False            # old image passed off as recent
     recycled_confidence: float = 0.0
 

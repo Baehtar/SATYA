@@ -36,6 +36,13 @@ graph TD
     STT --> TextPipe
     MLS -->|image| AIDet[HF Inference API<br/>Organika/sdxl-detector]
     MLS -->|image| OCR[services/ocr<br/>Gemini Vision + tesseract fallback]
+    MLS -->|image| Rev[services/image<br/>Reverse Image Engine]
+    Rev --> Vision[Google Vision<br/>Web Detection]
+    Rev --> Lens[SerpAPI Google Lens<br/>needs a public URL]
+    Rev --> Forensics[ELA · noise · copy-move<br/>resampling · EXIF · JPEG]
+    Vision --> Dates[Page fetch → date extraction<br/>JSON-LD → meta → time → text → URL]
+    Lens --> Dates
+    Dates --> Provenance[Earliest LOCATED appearance<br/>vs claimed date]
     OCR --> TextPipe
     MLS -->|text| TextPipe[src/pipelines/text/pipeline.py]
 

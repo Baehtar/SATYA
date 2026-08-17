@@ -217,11 +217,30 @@ def _verdict_and_confidence(result: Dict[str, Any], mode: str) -> Tuple[str, flo
     return backend_verdict.lower(), confidence
 
 
+def _provenance(result: Dict[str, Any]) -> Dict[str, Any]:
+    """check_mixed() nests the image result, so look one level down too."""
+    return result.get("provenance") or (result.get("image") or {}).get("provenance") or {}
+
+
 def _image_flags(result: Dict[str, Any]) -> List[str]:
     """Only signals this backend actually computes — no invented flags."""
     flags: List[str] = []
     if _ai_score(result) >= AI_IMAGE_THRESHOLD:
         flags.append("AI_GENERATED")
+
+    provenance = _provenance(result)
+    status = provenance.get("image_status")
+    if status == "RECYCLED" and float(provenance.get("status_confidence") or 0.0) >= 0.5:
+        flags.append("RECYCLED_IMAGE")
+    elif status in ("PREVIOUSLY_PUBLISHED", "CONTEMPORANEOUS"):
+        flags.append("PUBLISHED_ONLINE_BEFORE")
+
+    forensics = provenance.get("forensics") or {}
+    if float(forensics.get("manipulation_score") or 0.0) >= 0.6:
+        flags.append("MANIPULATION_SIGNALS")
+    if float(forensics.get("copy_move_score") or 0.0) >= 0.5:
+        flags.append("CLONED_REGION")
+
     return flags
 
 
@@ -329,6 +348,34 @@ async def build_card(
             "latency_ms": latency_ms,
         },
     }
+
+    # Provenance travels as its own block, never folded into the claim verdict:
+    # where a photo has been before is a different question from whether the
+    # sentence about it is true.
+    provenance = _provenance(result)
+    if provenance:
+        analysis = provenance.get("date_analysis") or {}
+        card["provenance"] = {
+            "status": provenance.get("image_status"),
+            "status_confidence": round(float(provenance.get("status_confidence") or 0.0), 3),
+            "earliest_located_date": provenance.get("earliest_located_date"),
+            "claim_date": analysis.get("claim_date"),
+            "date_difference_days": analysis.get("date_difference_days"),
+            "searched": bool(provenance.get("searched")),
+            "n_matches": provenance.get("n_matches_total", 0),
+            "notes": provenance.get("notes") or [],
+            "matches": [
+                {
+                    "url": m.get("url"),
+                    "domain": m.get("domain"),
+                    "title": m.get("page_title"),
+                    "match_type": m.get("match_type"),
+                    "published_date": m.get("published_date"),
+                    "date_confidence": m.get("date_confidence"),
+                }
+                for m in (provenance.get("reverse_matches") or [])[:5]
+            ],
+        }
 
     log.info(
         "web_card_built",
