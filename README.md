@@ -57,6 +57,19 @@ cp .env.example .env
 | `SERPAPI_KEY` | [serpapi.com](https://serpapi.com) (free: 100 searches/month) |
 | `GOOGLE_FACTCHECK_API_KEY` | [Google Cloud Console](https://console.cloud.google.com/) → Fact Check Tools API (free) |
 
+**Voice notes (Whisper STT)** — set one of these for the best multilingual accuracy:
+| Key | Where to get it | Model used |
+|---|---|---|
+| `OPENAI_API_KEY` | [platform.openai.com](https://platform.openai.com/api-keys) | `whisper-1` |
+| `GROQ_API_KEY` | [console.groq.com](https://console.groq.com/keys) (free tier) | `whisper-large-v3` |
+
+With `STT_ENGINE=auto` (the default), Satya uses Whisper when one of those keys is
+present and falls back to Gemini speech-to-text otherwise — and if the preferred
+engine errors out, the other one is tried before the request fails. Set
+`WHISPER_API_BASE` to point at any other OpenAI-compatible endpoint (e.g. a
+self-hosted faster-whisper server), or `WHISPER_BACKEND=local` to run the
+`openai-whisper` package on your own GPU.
+
 ### 5. Run the Telegram bot
 ```bash
 python main.py
@@ -126,6 +139,9 @@ satya/
 │   ├── ml_service.py                # check_text / check_image / check_voice / check_mixed
 │   ├── ocr/                         # Multilingual OCR (Gemini Vision + tesseract fallback)
 │   └── audio/                       # Voice-note speech-to-text
+│       ├── transcribe.py            # Engine dispatch: Whisper ⇄ Gemini fallback
+│       ├── whisper_stt.py           # Whisper (OpenAI-compatible API, or local)
+│       └── convert.py               # ffmpeg transcode for unsupported containers
 ├── UI/                              # Web front-end (entry: python -m UI.run)
 │   ├── src/server.py                # FastAPI + SSE progress streaming
 │   ├── src/adapter.py               # Backend result → verdict-card JSON

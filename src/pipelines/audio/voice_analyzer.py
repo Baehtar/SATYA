@@ -2,49 +2,20 @@
 src/pipelines/audio/voice_analyzer.py — Voice note analysis pipeline.
 Owned by: Person 4
 
-1. Whisper STT: transcribe voice note (GPU-accelerated)
+1. Whisper STT: transcribe voice note (services/audio — API or local backend)
 2. Voice clone detection: spectral analysis for synthetic voice markers
+
+Both steps read the same file, so they run concurrently: STT is network-bound
+under the default API backend, clone detection is CPU-bound in a thread.
 """
 import asyncio
 import functools
 import structlog
 import numpy as np
 from pathlib import Path
-from src.config import settings
 from src.models.schemas import CheckRequest, AudioAnalysis
 
 log = structlog.get_logger(__name__)
-
-_whisper_model = None
-
-
-def _get_whisper():
-    global _whisper_model
-    if _whisper_model is None:
-        import whisper
-        log.info("loading_whisper", size=settings.whisper_model_size)
-        _whisper_model = whisper.load_model(
-            settings.whisper_model_size,
-            device="cuda" if settings.use_gpu else "cpu",
-        )
-        log.info("whisper_loaded")
-    return _whisper_model
-
-
-def _transcribe(audio_path: str) -> dict:
-    """Synchronous Whisper transcription."""
-    model = _get_whisper()
-    result = model.transcribe(
-        audio_path,
-        language=None,          # auto-detect (handles Hindi, English, Hinglish)
-        task="transcribe",
-        fp16=settings.use_gpu,
-    )
-    return {
-        "text": result["text"].strip(),
-        "language": result.get("language", "hi"),
-        "segments": result.get("segments", []),
-    }
 
 
 def _detect_voice_clone(audio_path: str) -> dict:
@@ -103,13 +74,6 @@ def _detect_voice_clone(audio_path: str) -> dict:
         return {"clone_score": 0.0, "anomalies": []}
 
 
-def _run_full_audio_analysis(audio_path: str) -> dict:
-    """Synchronous full audio analysis."""
-    transcription = _transcribe(audio_path)
-    clone_result = _detect_voice_clone(audio_path)
-    return {**transcription, **clone_result}
-
-
 async def run_audio_pipeline(request: CheckRequest) -> AudioAnalysis:
     """Async entry point for audio pipeline."""
     import time
@@ -118,20 +82,35 @@ async def run_audio_pipeline(request: CheckRequest) -> AudioAnalysis:
     if not request.audio_path or not Path(request.audio_path).exists():
         return AudioAnalysis(error="No audio file provided")
 
+    audio_path = request.audio_path
+
     try:
+        from services.audio import transcribe_audio
+
         loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(
-            None,
-            functools.partial(_run_full_audio_analysis, request.audio_path)
+        stt, clone = await asyncio.gather(
+            transcribe_audio(audio_path),
+            loop.run_in_executor(None, functools.partial(_detect_voice_clone, audio_path)),
         )
 
+        latency_ms = int((time.monotonic() - start) * 1000)
+
+        if not stt.get("success"):
+            # Clone detection still ran, so report it alongside the STT failure.
+            return AudioAnalysis(
+                voice_clone_score=clone.get("clone_score", 0.0),
+                spectral_anomalies=clone.get("anomalies", []),
+                error=stt.get("error") or "Transcription failed",
+                pipeline_latency_ms=latency_ms,
+            )
+
         return AudioAnalysis(
-            transcription=result.get("text", ""),
-            transcription_language=result.get("language", "hi"),
-            transcription_confidence=0.9,  # Whisper doesn't return per-transcript confidence
-            voice_clone_score=result.get("clone_score", 0.0),
-            spectral_anomalies=result.get("anomalies", []),
-            pipeline_latency_ms=int((time.monotonic() - start) * 1000),
+            transcription=stt.get("text", ""),
+            transcription_language=stt.get("language") or "hi",
+            transcription_confidence=stt.get("confidence", 0.9),
+            voice_clone_score=clone.get("clone_score", 0.0),
+            spectral_anomalies=clone.get("anomalies", []),
+            pipeline_latency_ms=latency_ms,
         )
 
     except Exception as e:

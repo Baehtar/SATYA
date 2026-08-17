@@ -128,6 +128,9 @@ async def index() -> FileResponse:
 async def health() -> Dict[str, Any]:
     """Reports which capabilities are actually usable — the fastest way to see
     why results are degraded (a missing key silently downgrades a pipeline)."""
+    from services.audio import whisper_stt
+
+    whisper_config = whisper_stt.resolve_api_config()
     return {
         "status": "ok",
         "gemini_configured": bool(settings.gemini_api_key),     # OCR, claims, transcription
@@ -135,6 +138,9 @@ async def health() -> Dict[str, Any]:
         "google_factcheck_configured": bool(settings.google_factcheck_api_key),
         "serpapi_configured": bool(settings.serpapi_key),
         "ffmpeg_available": bool(shutil.which("ffmpeg")),       # voice-note transcoding
+        "stt_engine": settings.stt_engine,                      # voice-note speech-to-text
+        "whisper_configured": whisper_stt.is_configured(),
+        "whisper_model": whisper_config[2] if whisper_config else None,
     }
 
 
