@@ -78,3 +78,21 @@ class Settings(BaseSettings):
 
 # Singleton — import this everywhere
 settings = Settings()  # type: ignore[call-arg]
+
+
+def is_real_key(value: str) -> bool:
+    """
+    True when a setting holds an actual credential rather than the placeholder
+    text copied from .env.example.
+
+    Without this, `GOOGLE_VISION_API_KEY=your_google_vision_api_key_here` is a
+    non-empty string, so the provider reports itself configured, calls the API
+    and gets a 400 — surfacing as a confusing error instead of the honest
+    "not configured yet".
+    """
+    if not value:
+        return False
+    candidate = value.strip().lower()
+    if not candidate:
+        return False
+    return not (candidate.startswith("your_") or candidate.endswith("_here"))
