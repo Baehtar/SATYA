@@ -16,18 +16,6 @@ Satya is a Telegram bot that acts as an AI-powered fact-checker inside your mess
 
 ---
 
-## Team Setup (4 People)
-
-| Person | Owns | Branch |
-|---|---|---|
-| **Person 1** (GPU machine) | Image pipeline (`src/pipelines/image/`) | `feature/image` |
-| **Person 2** | Text pipeline (`src/pipelines/text/`) | `feature/text` |
-| **Person 3** | Telegram bot + Verdict engine (`src/bot/`, `src/verdict/`) | `feature/bot` |
-| **Person 4** | Stretch goals + Dashboard (`src/pipelines/audio/`, `src/pipelines/screenshot/`, `src/dashboard/`) | `feature/stretch` |
-
-**Integration machine = Person 1's GPU machine.** All teammates push to their branch and the GPU machine pulls to run the full bot.
-
----
 
 ## Quick Start
 
