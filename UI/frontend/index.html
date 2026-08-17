@@ -107,6 +107,8 @@
                     </div>
                 </div>
 
+                <div class="error-banner hidden" id="error-banner" role="alert" aria-live="polite"></div>
+
                 <button class="primary-btn submit-btn" id="submit-check">Check This &rarr;</button>
             </div>
         </section>
@@ -131,6 +133,11 @@
 
                 <div class="image-flags hidden" id="image-flags"></div>
 
+                <div class="claim-box hidden" id="claim-box">
+                    <span class="claim-label" id="claim-label">Claim checked</span>
+                    <p class="claim-text" id="claim-text"></p>
+                </div>
+
                 <div class="explanation-grid">
                     <div class="explanation-block">
                         <h3>🔍 What we found</h3>
@@ -148,7 +155,10 @@
                 </div>
 
                 <div class="verdict-footer">
-                    <p class="disclaimer"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg> <span id="disclaimer-text"></span></p>
+                    <div>
+                        <p class="disclaimer"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg> <span id="disclaimer-text"></span></p>
+                        <p class="verdict-meta" id="verdict-meta"></p>
+                    </div>
                     <button class="secondary-btn" id="check-again-btn">Check Another</button>
                 </div>
             </div>

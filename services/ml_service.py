@@ -11,11 +11,13 @@ HF_API_KEY = os.getenv("HF_API_KEY", "")
 HF_IMAGE_MODEL = os.getenv("HF_IMAGE_MODEL", "Organika/sdxl-detector")
 
 
-async def check_text(text: str):
+async def check_text(text: str, progress_callback=None):
     """
     Multilingual Fake News & Claim Verification Pipeline.
     Supports EN, HI (Devanagari/Roman), TA (Tamil/Roman), and Mixed languages.
     Searches PIB, Alt News, BOOM, and Google FactCheck API in parallel.
+
+    progress_callback(message: str, step: str) — optional async hook for streaming UIs.
     """
     print(f"TEXT CLAIM SENT TO VERIFICATION PIPELINE:\n{text[:150]}...")
 
@@ -29,7 +31,7 @@ async def check_text(text: str):
     )
 
     try:
-        analysis = await run_text_pipeline(req)
+        analysis = await run_text_pipeline(req, progress_callback=progress_callback)
 
         # Build clean sources list
         sources = [
@@ -150,18 +152,20 @@ async def check_image(image_path: str, progress_callback=None, mode: str = None)
     - mode="ai_image": Dedicated AI visual detector report (SDXL / Midjourney / DALL-E).
     - mode="fake_news" / "extract_image": Dedicated OCR text extraction & news claim verification.
     - mode=None: Full combined pipeline (AI Image Detector + OCR Claim Verification).
+
+    progress_callback(message: str, step: str) — optional async hook for streaming UIs.
     """
     print(f"IMAGE PROCESSOR ACTIVATED (Mode={mode}): {image_path}")
 
     # Mode 3: Dedicated AI Image Detection
     if mode == "ai_image":
         if progress_callback:
-            await progress_callback("🤖 Running AI Image Authenticity Detection (SDXL/Midjourney)...")
+            await progress_callback("🤖 Running AI image authenticity detection (SDXL / Midjourney / DALL-E)…", "image_analysis")
         ai_res = await check_image_ai(image_path)
         image_ai_score = float(ai_res.get("artificial_score", 0.0))
 
         if progress_callback:
-            await progress_callback("✅ AI visual inspection complete.")
+            await progress_callback("✅ AI visual inspection complete.", "image_analysis")
 
         return {
             "type": "image",
@@ -174,7 +178,7 @@ async def check_image(image_path: str, progress_callback=None, mode: str = None)
 
     # Mode 1 & 2 / Combined Flow
     if progress_callback:
-        await progress_callback("🔍 Reading image & running analysis...")
+        await progress_callback("🔍 Reading the image & extracting any text…", "image_analysis")
 
     ai_task = check_image_ai(image_path)
 
@@ -188,7 +192,7 @@ async def check_image(image_path: str, progress_callback=None, mode: str = None)
     # Step 2: Check if OCR found readable text in image
     if not ocr_meta.get("has_readable_text"):
         if progress_callback:
-            await progress_callback("✅ No news text detected in image. Visual AI report ready.")
+            await progress_callback("✅ No readable text in the image — visual AI report ready.", "image_analysis")
         return {
             "type": "image",
             "verdict": ai_res.get("verdict", "UNVERIFIABLE"),
@@ -201,7 +205,7 @@ async def check_image(image_path: str, progress_callback=None, mode: str = None)
 
     # Step 3: Run Text Claim Extraction & Verification Pipeline
     if progress_callback:
-        await progress_callback(f"📝 Extracted news text ({ocr_meta.get('language')}). Checking claim against PIB/AltNews/BOOM/Google...")
+        await progress_callback(f"📝 Text extracted ({ocr_meta.get('language')}) — verifying the claim…", "image_analysis")
 
     from src.models.schemas import CheckRequest
     from src.pipelines.text.pipeline import run_text_pipeline
@@ -213,10 +217,7 @@ async def check_image(image_path: str, progress_callback=None, mode: str = None)
         text_content=ocr_meta.get("cleaned_text", "")
     )
 
-    if progress_callback:
-        await progress_callback("⚖️ Comparing evidence & calibrating verdict...")
-
-    text_analysis = await run_text_pipeline(req)
+    text_analysis = await run_text_pipeline(req, progress_callback=progress_callback)
 
     # Step 4: Aggregate Evidence & Fuse Image AI + Claim NLI Signals
     fused_res = aggregate_evidence(text_analysis, image_ai_score, ocr_meta)
@@ -251,7 +252,7 @@ async def check_image(image_path: str, progress_callback=None, mode: str = None)
         )
 
     if progress_callback:
-        await progress_callback("✅ Analysis complete.")
+        await progress_callback("✅ Analysis complete.", "generating_verdict")
 
     return {
         "type": "image",
@@ -266,30 +267,60 @@ async def check_image(image_path: str, progress_callback=None, mode: str = None)
     }
 
 
-async def check_voice(audio_path: str):
+async def check_voice(audio_path: str, progress_callback=None):
     """
-    Speech-to-text + claim verification for voice notes.
+    Speech-to-text (Gemini) → the same multilingual claim verification pipeline
+    used for text forwards. Returns the text verdict plus the transcript.
     """
     print(f"VOICE SENT TO ML: {audio_path}")
-    await asyncio.sleep(1)
 
-    return {
-        "type": "voice",
-        "verdict": "UNVERIFIABLE",
-        "confidence": 0.0,
-        "explanation": "Voice transcription pipeline is active. Transcribed claims are processed via the fake news engine.",
-        "sources": []
-    }
+    from services.audio import transcribe_audio
+
+    if progress_callback:
+        await progress_callback("🎤 Transcribing the voice note…", "audio_analysis")
+
+    stt = await transcribe_audio(audio_path)
+
+    if not stt.get("success") or not stt.get("text"):
+        return {
+            "type": "voice",
+            "verdict": "UNVERIFIABLE",
+            "confidence": 0.0,
+            "transcript": "",
+            "explanation": (
+                "<b>Could not transcribe this voice note.</b>\n\n"
+                f"{stt.get('error') or 'No intelligible speech was found.'}\n\n"
+                "Try a clearer recording, or paste the claim as text instead."
+            ),
+            "sources": []
+        }
+
+    transcript = stt["text"]
+
+    if progress_callback:
+        await progress_callback(
+            f"🗣️ Heard: “{transcript[:60]}…” — verifying the claim…", "audio_analysis"
+        )
+
+    result = await check_text(transcript, progress_callback=progress_callback)
+
+    result["type"] = "voice"
+    result["transcript"] = transcript
+    result["explanation"] = (
+        f"🎤 <b>Transcript</b>\n<i>\"{transcript[:400]}\"</i>\n\n"
+        f"{result.get('explanation', '')}"
+    )
+    return result
 
 
-async def check_mixed(image_path: str, caption: str):
+async def check_mixed(image_path: str, caption: str, progress_callback=None):
     """
     Runs Image AI Detector AND Text Claim Pipeline in parallel.
     Performs Evidence Fusion (Section 2 & 16 of fake_news_workflow.md):
     - Image AI score is an image authenticity signal, NOT proof that text claim is false!
     """
-    image_task = check_image(image_path)
-    text_task = check_text(caption) if caption else None
+    image_task = check_image(image_path, progress_callback=progress_callback)
+    text_task = check_text(caption, progress_callback=progress_callback) if caption else None
 
     if text_task:
         image_result, text_result = await asyncio.gather(image_task, text_task)

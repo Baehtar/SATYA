@@ -11,6 +11,7 @@
     --color-verdict-true: #2D9F6F;
     --color-verdict-unverifiable: #D4A017;
     --color-verdict-false: #E8503A;
+    --color-verdict-ai: #7C5CD3;
     --color-tag-bg: #F2F2EE;
 
     --font-display: 'Space Grotesk', sans-serif;
@@ -31,6 +32,7 @@
     --color-verdict-true: #34B87A;
     --color-verdict-unverifiable: #E0AD1F;
     --color-verdict-false: #EF6449;
+    --color-verdict-ai: #9B7DE8;
     --color-tag-bg: #252525;
 }
 
@@ -549,6 +551,15 @@ body {
     color: white;
 }
 
+.step.skipped {
+    opacity: 0.45;
+}
+
+.step.skipped .step-icon {
+    border: 2px solid var(--color-border);
+    color: var(--color-text-muted);
+}
+
 .step-label {
     font-size: 14px;
     font-weight: 500;
@@ -611,6 +622,11 @@ body {
     color: white;
 }
 
+.verdict-badge.ai {
+    background: var(--color-verdict-ai);
+    color: white;
+}
+
 .confidence-container {
     width: 100%;
 }
@@ -642,6 +658,7 @@ body {
 .confidence-fill.true { background: var(--color-verdict-true); }
 .confidence-fill.unverifiable { background: var(--color-verdict-unverifiable); }
 .confidence-fill.false { background: var(--color-verdict-false); }
+.confidence-fill.ai { background: var(--color-verdict-ai); }
 
 .image-flags {
     display: flex;
@@ -722,6 +739,53 @@ body {
     display: flex;
     gap: 6px;
     max-width: 400px;
+}
+
+/* Error banner */
+.error-banner {
+    margin-top: 20px;
+    padding: 12px 16px;
+    border-radius: 8px;
+    border: 1px solid var(--color-verdict-false);
+    background: color-mix(in srgb, var(--color-verdict-false) 10%, transparent);
+    color: var(--color-text);
+    font-size: 14px;
+}
+
+/* What was actually checked */
+.claim-box {
+    border-left: 3px solid var(--color-accent);
+    background: var(--color-tag-bg);
+    border-radius: 0 8px 8px 0;
+    padding: 12px 16px;
+    margin-bottom: 28px;
+}
+
+.claim-label {
+    display: block;
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    font-weight: 600;
+    color: var(--color-text-secondary);
+    margin-bottom: 4px;
+}
+
+.claim-text {
+    font-size: 15px;
+    color: var(--color-text);
+    overflow-wrap: anywhere;
+}
+
+.sources-empty {
+    font-size: 13px;
+    color: var(--color-text-muted);
+}
+
+.verdict-meta {
+    font-size: 12px;
+    color: var(--color-text-muted);
+    margin-top: 6px;
 }
 
 /* How It Works */
