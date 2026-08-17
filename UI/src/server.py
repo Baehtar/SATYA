@@ -58,6 +58,13 @@ STEP_MAP = {
 }
 UI_STEPS = ["analyze", "search", "verdict"]
 
+# What the user asked for. FAKE_NEWS verifies a claim (text, or text read out of an
+# image); AI_IMAGE only asks the detector whether a picture is synthetic — no OCR,
+# no claim extraction, no source search.
+MODE_FAKE_NEWS = "fake_news"
+MODE_AI_IMAGE = "ai_image"
+VALID_MODES = {MODE_FAKE_NEWS, MODE_AI_IMAGE}
+
 app = FastAPI(title="Satya Web UI", version="1.0.0")
 
 app.add_middleware(
@@ -141,6 +148,7 @@ async def _run_analysis(
     text: str,
     image_path: Optional[str],
     audio_path: Optional[str],
+    mode: str,
 ) -> None:
     """Runs the shared pipeline, streaming progress into `queue`."""
     start = time.monotonic()
@@ -167,7 +175,11 @@ async def _run_analysis(
 
     try:
         async with asyncio.timeout(settings.total_timeout):
-            if image_path and text:
+            if mode == MODE_AI_IMAGE:
+                # Authenticity only — the caption, OCR and fact-check search are
+                # deliberately skipped so the answer is just about the picture.
+                result = await check_image(image_path, progress_callback=progress, mode=MODE_AI_IMAGE)
+            elif image_path and text:
                 result = await check_mixed(image_path, text, progress_callback=progress)
             elif image_path:
                 result = await check_image(image_path, progress_callback=progress)
@@ -189,7 +201,7 @@ async def _run_analysis(
 
         await queue.put(("progress", {"step": "verdict", "status": "running", "message": "Writing the verdict…"}))
         latency_ms = int((time.monotonic() - start) * 1000)
-        card = await build_card(result, submitted_text=text, latency_ms=latency_ms)
+        card = await build_card(result, submitted_text=text, latency_ms=latency_ms, mode=mode)
         await queue.put(("progress", {"step": "verdict", "status": "completed", "message": "Verdict ready"}))
         await queue.put(("verdict", card))
         log.info("check_complete", job_id=job_id, verdict=card["verdict"], latency_ms=latency_ms)
@@ -232,13 +244,24 @@ async def create_check(
     text: Optional[str] = Form(default=None),
     image: Optional[UploadFile] = File(default=None),
     audio: Optional[UploadFile] = File(default=None),
+    mode: str = Form(default=MODE_FAKE_NEWS),
 ) -> JSONResponse:
     """Accepts the submission and starts the analysis; returns a job id to stream."""
     _prune_jobs()
 
+    if mode not in VALID_MODES:
+        return JSONResponse({"error": f"Unknown mode '{mode}'."}, status_code=422)
+
     text = (text or "").strip()
     if not text and image is None and audio is None:
         return JSONResponse({"error": "Send text, an image, or a voice recording."}, status_code=422)
+
+    if mode == MODE_AI_IMAGE:
+        if image is None:
+            return JSONResponse({"error": "AI-image detection needs an image."}, status_code=422)
+        # Nothing else is analysed in this mode; don't pretend otherwise.
+        text = ""
+        audio = None
 
     job_id = str(uuid.uuid4())
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -266,10 +289,11 @@ async def create_check(
         return JSONResponse({"error": str(e)}, status_code=413)
 
     job = Job()
-    job.task = asyncio.create_task(_run_analysis(job_id, job.queue, text, image_path, audio_path))
+    job.task = asyncio.create_task(_run_analysis(job_id, job.queue, text, image_path, audio_path, mode))
     _jobs[job_id] = job
 
-    log.info("check_started", job_id=job_id, has_text=bool(text), has_image=bool(image_path), has_audio=bool(audio_path))
+    log.info("check_started", job_id=job_id, mode=mode, has_text=bool(text),
+             has_image=bool(image_path), has_audio=bool(audio_path))
     return JSONResponse({"id": job_id})
 
 

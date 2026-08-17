@@ -1,6 +1,7 @@
 // Verdict slugs come from UI/src/adapter.py.
 const VERDICT_DISPLAY = {
     likely_true:        { emoji: '🟢', label: 'Likely True',        cls: 'true' },
+    authentic_image:    { emoji: '🟢', label: 'Not AI-Generated',    cls: 'true' },
     likely_false:       { emoji: '🔴', label: 'Likely False',       cls: 'false' },
     ai_generated:       { emoji: '🤖', label: 'AI Generated',       cls: 'ai' },
     manipulated:        { emoji: '✂️', label: 'Manipulated',        cls: 'ai' },
@@ -97,6 +98,7 @@ export function resetVerdict() {
     flags.classList.add('hidden');
 
     document.getElementById('claim-box').classList.add('hidden');
+    document.getElementById('sources-section').classList.remove('hidden');
     document.getElementById('sources-list').innerHTML = '';
     document.getElementById('verdict-meta').textContent = '';
 }
@@ -133,6 +135,11 @@ export function renderVerdict(data) {
     document.getElementById('explanation-hi').textContent = data.explanation_hi || '';
 
     // ── Sources ──────────────────────────────────────────────────────────────
+    // A dedicated AI-image check has no claim and no sources — hide the section
+    // rather than showing an empty "no fact-checks matched" note.
+    const aiImageMode = (data.meta || {}).mode === 'ai_image';
+    document.getElementById('sources-section').classList.toggle('hidden', aiImageMode);
+
     const sourcesList = document.getElementById('sources-list');
     sourcesList.innerHTML = '';
     if (data.sources && data.sources.length > 0) {
@@ -156,7 +163,9 @@ export function renderVerdict(data) {
     // ── Image flags ──────────────────────────────────────────────────────────
     const flagsContainer = document.getElementById('image-flags');
     flagsContainer.innerHTML = '';
-    if (data.image_flags && data.image_flags.length > 0) {
+    if (aiImageMode) {
+        flagsContainer.classList.add('hidden');   // the verdict already says it
+    } else if (data.image_flags && data.image_flags.length > 0) {
         flagsContainer.classList.remove('hidden');
         data.image_flags.forEach(flag => {
             const span = document.createElement('span');
@@ -179,5 +188,6 @@ export function renderVerdict(data) {
     if (meta.type === 'image' || meta.type === 'mixed') {
         bits.push(`AI-image score ${Math.round((meta.image_ai_score || 0) * 100)}%`);
     }
+    bits.push(meta.mode === 'ai_image' ? 'AI-image detection' : 'fake-news check');
     document.getElementById('verdict-meta').textContent = bits.join(' · ');
 }
