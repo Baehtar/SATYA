@@ -24,7 +24,7 @@ from typing import Any, Dict, List
 
 import httpx
 
-from src.config import settings
+from src.config import is_real_key, settings
 from services.image.match_ranker import (
     FULL_MATCH, HIGH_VISUAL_SIMILARITY, LOW_VISUAL_SIMILARITY,
     PARTIAL_MATCH, normalise_match,
@@ -42,7 +42,7 @@ MAX_RESULTS_PER_FIELD = 20
 
 
 def is_configured() -> bool:
-    return bool(settings.google_vision_api_key)
+    return is_real_key(settings.google_vision_api_key)
 
 
 def _pages(web: Dict[str, Any]) -> List[Dict[str, Any]]:

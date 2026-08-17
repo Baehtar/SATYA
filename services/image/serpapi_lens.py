@@ -28,7 +28,7 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
-from src.config import settings
+from src.config import is_real_key, settings
 from services.image.match_ranker import (
     EXACT_MATCH, FULL_MATCH, HIGH_VISUAL_SIMILARITY, LOW_VISUAL_SIMILARITY,
     normalise_match,
@@ -46,7 +46,7 @@ HIGH_SIMILARITY_CUTOFF = 5
 
 
 def is_configured() -> bool:
-    return bool(settings.serpapi_key)
+    return is_real_key(settings.serpapi_key)
 
 
 def public_url_for(image_path: str) -> Optional[str]:

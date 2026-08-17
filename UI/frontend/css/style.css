@@ -691,10 +691,65 @@ body {
     margin-bottom: 32px;
 }
 
-.explanation-block h3, .sources-section h3 {
+.explanation-block h3, .sources-section h3, .provenance-section h3 {
     font-family: var(--font-display);
     font-size: 18px;
     margin-bottom: 12px;
+}
+
+/* ── Image provenance ─────────────────────────────────────────────────────
+   Its own bordered block so it reads as a separate finding from the claim
+   verdict, not as supporting detail for it. */
+.provenance-section {
+    margin-top: 28px;
+    padding-top: 24px;
+    border-top: 1px solid var(--color-border);
+}
+
+.provenance-status {
+    display: inline-block;
+    padding: 6px 12px;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 600;
+    margin-bottom: 14px;
+    background: var(--color-tag-bg);
+    color: var(--color-text);
+}
+
+.provenance-status.bad     { background: rgba(220, 38, 38, 0.12);  color: #dc2626; }
+.provenance-status.warn    { background: rgba(217, 119, 6, 0.12);  color: #d97706; }
+.provenance-status.ok      { background: rgba(22, 163, 74, 0.12);  color: #16a34a; }
+.provenance-status.neutral { background: var(--color-tag-bg);      color: var(--color-text-secondary); }
+
+.provenance-facts {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 4px 16px;
+    font-size: 14px;
+    margin-bottom: 14px;
+}
+
+.provenance-facts dt { color: var(--color-text-secondary); }
+.provenance-facts dd { color: var(--color-text); font-weight: 500; }
+
+.provenance-matches {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 12px;
+}
+
+.provenance-note {
+    font-size: 13px;
+    color: var(--color-text-secondary);
+    font-style: italic;
+    line-height: 1.5;
+}
+
+@media (max-width: 480px) {
+    .provenance-facts { grid-template-columns: 1fr; gap: 2px 0; }
+    .provenance-facts dd { margin-bottom: 8px; }
 }
 
 .explanation-block p {
