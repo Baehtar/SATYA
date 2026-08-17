@@ -147,8 +147,8 @@ async def check_image_ai(image_path: str):
 async def check_image(image_path: str, progress_callback=None, mode: str = None):
     """
     FULL TARGET FLOW with Mode Selection Support:
-    - mode="ai_image": Dedicated AI visual detector report.
-    - mode="extract_image": Dedicated Multilingual OCR text extraction & claim verification.
+    - mode="ai_image": Dedicated AI visual detector report (SDXL / Midjourney / DALL-E).
+    - mode="fake_news" / "extract_image": Dedicated OCR text extraction & news claim verification.
     - mode=None: Full combined pipeline (AI Image Detector + OCR Claim Verification).
     """
     print(f"IMAGE PROCESSOR ACTIVATED (Mode={mode}): {image_path}")

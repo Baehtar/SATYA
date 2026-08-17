@@ -28,13 +28,34 @@ log = structlog.get_logger(__name__)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
+    welcome_text = (
+        f"🛡️ <b>Welcome {user.first_name} to Satya — AI News & Media Fact-Checker</b>\n\n"
+        "What analysis would you like to perform?\n\n"
+        "1️⃣ <b>Fake News Detection</b>\n"
+        "<i>Verify written news claims, viral messages, or news text extracted from images.</i>\n\n"
+        "2️⃣ <b>Fake AI Image Detection</b>\n"
+        "<i>Detect if an image is AI-generated (SDXL/Midjourney/DALL-E) or authentic.</i>\n\n"
+        "👇 <b>Select an option below or send your content directly:</b>"
+    )
+
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "📰 1. Fake News Detection",
+                callback_data="mode_fake_news"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🤖 2. Fake AI Image Detection",
+                callback_data="mode_ai_image"
+            )
+        ]
+    ]
+
     await update.message.reply_html(
-        f"🙏 नमस्ते <b>{user.first_name}</b>!\n\n"
-        "मैं <b>Satya</b> हूँ — आपका AI fact-checker.\n\n"
-        "किसी भी संदिग्ध forward को यहाँ भेजें:\n"
-        "📷 Image • 💬 Text • 🎤 Voice note\n\n"
-        "मैं 60 सेकंड में बताऊँगा — सच, झूठ, या अज्ञात.\n\n"
-        "<i>Send me any suspicious forward and I'll check it.</i>"
+        welcome_text,
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 

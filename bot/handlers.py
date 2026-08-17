@@ -39,12 +39,10 @@ async def start(
     welcome_text = (
         "🛡️ <b>Welcome to Satya — AI News & Media Fact-Checker</b>\n\n"
         "What analysis would you like to perform?\n\n"
-        "1️⃣ <b>Fake Text News Analysis</b>\n"
-        "<i>Verify written news claims, viral messages, or forwards.</i>\n\n"
-        "2️⃣ <b>Extract News from Image</b>\n"
-        "<i>OCR extract text from news clippings/screenshots & fact-check.</i>\n\n"
-        "3️⃣ <b>Check AI-Generated Image</b>\n"
-        "<i>Detect if an image is AI-generated (SDXL/Midjourney) or authentic.</i>\n\n"
+        "1️⃣ <b>Fake News Detection</b>\n"
+        "<i>Verify written news claims, viral messages, or news text extracted from images.</i>\n\n"
+        "2️⃣ <b>Fake AI Image Detection</b>\n"
+        "<i>Detect if an image is AI-generated (SDXL/Midjourney/DALL-E) or authentic.</i>\n\n"
         "👇 <b>Select an option below or send your content directly:</b>"
     )
 
@@ -52,19 +50,13 @@ async def start(
         [
             [
                 InlineKeyboardButton(
-                    "💬 1. Fake Text News Analysis",
-                    callback_data="mode_text_news"
+                    "📰 1. Fake News Detection",
+                    callback_data="mode_fake_news"
                 )
             ],
             [
                 InlineKeyboardButton(
-                    "📰 2. Extract News from Image",
-                    callback_data="mode_extract_image"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "🤖 3. Check AI-Generated Image",
+                    "🤖 2. Fake AI Image Detection",
                     callback_data="mode_ai_image"
                 )
             ]
@@ -84,9 +76,8 @@ async def help_command(
 ):
     help_text = (
         "📖 <b>Satya Analysis Modes Guide</b>\n\n"
-        "1️⃣ <b>Text Analysis:</b> Send any text claim to check against PIB, Alt News, BOOM & Google News.\n"
-        "2️⃣ <b>Extract News from Image:</b> Send newspaper clips, social media graphics or screenshots to extract text & verify news claims.\n"
-        "3️⃣ <b>AI Image Detection:</b> Send photos to detect synthetic/AI generation.\n\n"
+        "1️⃣ <b>Fake News Detection:</b> Send written news claims, viral text, or news clipping/screenshot images to extract text & verify news claims against PIB, Alt News, BOOM & Google News.\n"
+        "2️⃣ <b>Fake AI Image Detection:</b> Send photos or images to test for synthetic/AI visual generation (SDXL/Midjourney/DALL-E).\n\n"
         "Use /start to reset options anytime."
     )
 
@@ -250,26 +241,18 @@ async def button_handler(
     query = update.callback_query
     await query.answer()
 
-    if query.data == "mode_text_news":
-        context.user_data["selected_mode"] = "text_news"
+    if query.data in ("mode_fake_news", "mode_text_news", "mode_extract_image"):
+        context.user_data["selected_mode"] = "fake_news"
         await query.message.reply_text(
-            "💬 <b>Option 1 Selected: Fake Text News Analysis</b>\n\n"
-            "Please send or forward the written news claim, rumor, or article text you want to verify.",
-            parse_mode="HTML"
-        )
-
-    elif query.data == "mode_extract_image":
-        context.user_data["selected_mode"] = "extract_image"
-        await query.message.reply_text(
-            "📰 <b>Option 2 Selected: Extract News from Image</b>\n\n"
-            "Please upload the newspaper clipping, tweet screenshot, WhatsApp forward image, or news chyron graphic.",
+            "📰 <b>Option 1 Selected: Fake News Detection</b>\n\n"
+            "Please send or forward the news claim text, viral message, or newspaper clipping/screenshot image you want to verify.",
             parse_mode="HTML"
         )
 
     elif query.data == "mode_ai_image":
         context.user_data["selected_mode"] = "ai_image"
         await query.message.reply_text(
-            "🤖 <b>Option 3 Selected: Check AI-Generated Image</b>\n\n"
+            "🤖 <b>Option 2 Selected: Fake AI Image Detection</b>\n\n"
             "Please upload the photo or image you want to test for AI visual generation (SDXL / Midjourney / DALL-E).",
             parse_mode="HTML"
         )
