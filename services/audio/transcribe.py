@@ -1,23 +1,30 @@
 """
 services/audio/transcribe.py — Speech-to-text for voice notes.
 
-Uses the Gemini API that the rest of Satya already depends on (OCR + claim
-extraction), so voice notes work without pulling in Whisper/torch.
+Two engines, chosen by STT_ENGINE:
+
+  whisper — Whisper via an OpenAI-compatible API (or the local package).
+            Best multilingual accuracy; see services/audio/whisper_stt.py.
+  gemini  — the Gemini API the rest of Satya already depends on (OCR + claim
+            extraction), so voice notes work with no extra key at all.
+
+STT_ENGINE=auto (the default) picks Whisper when a Whisper key is configured
+and falls back to Gemini otherwise — and if the chosen engine errors out, the
+other one is tried before giving up.
 
 Telegram sends OGG/Opus and browsers send WebM/Opus. Gemini accepts OGG but not
 WebM, so unsupported containers are transcoded to 16 kHz mono WAV with ffmpeg
 when it is installed. Without ffmpeg the file is sent as-is and, if the API
 rejects it, the caller gets an honest failure instead of a fabricated verdict.
 """
-import asyncio
 import os
-import shutil
-import tempfile
 import structlog
 from typing import Any, Dict
 from google import genai
 from google.genai import types
 from src.config import settings
+from services.audio.convert import to_wav
+from services.audio import whisper_stt
 
 log = structlog.get_logger(__name__)
 
@@ -52,38 +59,8 @@ def _get_client():
     return genai.Client(api_key=settings.gemini_api_key)
 
 
-async def _to_wav(audio_path: str) -> str | None:
-    """Transcodes any ffmpeg-readable audio to 16 kHz mono WAV. Returns the new path."""
-    ffmpeg = shutil.which("ffmpeg")
-    if not ffmpeg:
-        return None
-
-    out_path = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
-    process = await asyncio.create_subprocess_exec(
-        ffmpeg, "-y", "-loglevel", "error", "-i", audio_path,
-        "-ac", "1", "-ar", "16000", out_path,
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    _, stderr = await process.communicate()
-
-    if process.returncode != 0 or not os.path.getsize(out_path):
-        log.warning("ffmpeg_transcode_failed", error=stderr.decode()[:200])
-        if os.path.exists(out_path):
-            os.remove(out_path)
-        return None
-
-    return out_path
-
-
-async def transcribe_audio(audio_path: str) -> Dict[str, Any]:
-    """
-    Transcribes a voice note.
-    Returns {success, text, engine, error}.
-    """
-    if not audio_path or not os.path.exists(audio_path):
-        return {"success": False, "text": "", "engine": "none", "error": "Audio file does not exist."}
-
+async def _transcribe_with_gemini(audio_path: str) -> Dict[str, Any]:
+    """Transcribes a voice note with Gemini. Returns {success, text, engine, error}."""
     client = _get_client()
     if not client:
         return {"success": False, "text": "", "engine": "none", "error": "GEMINI_API_KEY is not configured."}
@@ -93,7 +70,7 @@ async def transcribe_audio(audio_path: str) -> Dict[str, Any]:
     temp_path = None
 
     if ext not in SUPPORTED_AUDIO_MIME:
-        temp_path = await _to_wav(audio_path)
+        temp_path = await to_wav(audio_path)
         if temp_path:
             send_path = temp_path
         else:
@@ -133,3 +110,68 @@ async def transcribe_audio(audio_path: str) -> Dict[str, Any]:
     finally:
         if temp_path and os.path.exists(temp_path):
             os.remove(temp_path)
+
+
+def _normalise(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Guarantees every caller sees the same keys whichever engine ran."""
+    return {
+        "success": result.get("success", False),
+        "text": result.get("text", ""),
+        "language": result.get("language", ""),
+        "confidence": result.get("confidence", 0.9 if result.get("success") else 0.0),
+        "segments": result.get("segments", []),
+        "engine": result.get("engine", "none"),
+        "error": result.get("error"),
+    }
+
+
+def _engine_order() -> list[str]:
+    """
+    Resolves STT_ENGINE into the engines to try, in order.
+    'auto' prefers Whisper when a key is configured, and always keeps the other
+    engine as a fallback so a single provider outage doesn't kill voice notes.
+    """
+    engine = (settings.stt_engine or "auto").strip().lower()
+    if engine == "whisper":
+        return ["whisper", "gemini"]
+    if engine == "gemini":
+        return ["gemini", "whisper"]
+    return ["whisper", "gemini"] if whisper_stt.is_configured() else ["gemini", "whisper"]
+
+
+async def transcribe_audio(audio_path: str, language: str | None = None) -> Dict[str, Any]:
+    """
+    Transcribes a voice note with whichever STT engine is configured.
+    `language` forces an ISO-639-1 code; blank/None auto-detects.
+    Returns {success, text, language, confidence, segments, engine, error}.
+    """
+    if not audio_path or not os.path.exists(audio_path):
+        return _normalise({"error": "Audio file does not exist."})
+
+    if not whisper_stt.is_configured() and not settings.gemini_api_key:
+        return _normalise({"error": (
+            "No speech-to-text engine is configured. Set WHISPER_API_KEY (or "
+            "OPENAI_API_KEY / GROQ_API_KEY) for Whisper, or GEMINI_API_KEY, in .env."
+        )})
+
+    first_error = None
+
+    for engine in _engine_order():
+        if engine == "whisper":
+            if not whisper_stt.is_configured():
+                first_error = first_error or (
+                    "No Whisper API key configured. Set WHISPER_API_KEY (or OPENAI_API_KEY / "
+                    "GROQ_API_KEY) in .env."
+                )
+                continue
+            result = await whisper_stt.transcribe_with_whisper(audio_path, language)
+        else:
+            result = await _transcribe_with_gemini(audio_path)
+
+        if result.get("success"):
+            return _normalise(result)
+
+        first_error = first_error or result.get("error")
+        log.info("stt_engine_failed_trying_next", engine=engine, error=result.get("error"))
+
+    return _normalise({"error": first_error or "No speech-to-text engine is configured."})

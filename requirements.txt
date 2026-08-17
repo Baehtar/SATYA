@@ -14,3 +14,7 @@ lxml>=4.9.0
 ddgs>=8.0.0
 pytesseract>=0.3.10
 easyocr>=1.7.0
+
+# Whisper STT runs over the API by default (httpx above — no extra install).
+# Only needed for WHISPER_BACKEND=local; pulls in torch and a multi-GB model:
+# openai-whisper>=20231117
