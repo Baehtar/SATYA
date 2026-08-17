@@ -1,47 +1,98 @@
-# Satya Architecture Documentation
+# Satya Web UI — Architecture
 
-Satya is built as a single-page web app + FastAPI backend providing real-time AI misinformation verification in < 60 seconds with bilingual (English + Hindi) output cards.
+The web UI is a **thin front-end over the shared backend**. It does no
+fact-checking of its own: it calls the same `services/ml_service.py` functions the
+Telegram bot calls, streams progress to the browser, and renders the verdict card.
 
-## Data Pipeline Architecture
+That is deliberate — the UI used to carry a second copy of the pipelines
+(`UI/src/pipelines/`, `UI/src/verdict/`, `UI/src/config.py`). Those copies were
+removed: two implementations of the same verdict logic drift apart, and only one of
+them was ever maintained.
+
+## How to run
+
+```bash
+# from the repo ROOT (the shared backend and .env live there)
+python -m UI.run            # → http://localhost:8000
+# equivalent: uvicorn UI.src.server:app --port 8000
+```
+
+`GET /api/health` shows which API keys are configured. A missing key silently
+degrades a pipeline (no `HF_API_KEY` → no AI-image detection; no `GEMINI_API_KEY`
+→ no OCR, claim extraction or voice transcription), so check it first when results
+look thin.
+
+## Request flow
 
 ```mermaid
 graph TD
-    User([User Request: Text / Image / Voice]) --> Router[src/pipelines/router.py]
-    
-    Router -->|Voice Recording| VoicePipeline[src/pipelines/audio/voice_analyzer.py]
-    VoicePipeline -->|Transcribed Text| TextPipeline
-    
-    Router -->|Image Input| ImagePipeline[src/pipelines/image/pipeline.py]
-    Router -->|Text Input| TextPipeline[src/pipelines/text/pipeline.py]
-    
-    subgraph Image Pipeline (Parallel 30s Budget)
-        ImagePipeline --> AIDetector[ai_detector.py: HF AI Detector + ELA]
-        ImagePipeline --> Manipulation[manipulation.py: EXIF + Noise Analysis]
-        ImagePipeline --> ReverseSearch[reverse_search.py: SerpAPI Google Lens]
-    end
-    
-    subgraph Text Pipeline (Sequential 25s Budget)
-        TextPipeline --> ClaimExtract[claim_extractor.py: Gemini 2.5 Flash]
-        ClaimExtract --> FactSearch[fact_checker.py: Google Fact Check + Local Index]
-        FactSearch --> ClaimMatch[claim_matcher.py: Semantic Matching]
-    end
-    
-    ImagePipeline --> Aggregator[src/verdict/aggregator.py]
-    TextPipeline --> Aggregator
-    
-    Aggregator --> ConfidenceEngine[src/verdict/confidence.py: Calibrated Scoring]
-    ConfidenceEngine --> CardGen[src/verdict/card_generator.py: Gemini Bilingual Explanation]
-    
-    CardGen --> SSEStream[SSE Stream: /api/check/{id}/stream]
-    SSEStream --> UI[Frontend Single Page App]
+    Browser([Browser: image / text / voice]) -->|POST /api/check| Server[UI/src/server.py]
+    Server -->|job id| Browser
+    Browser -->|GET /api/check/id/stream| Server
+
+    Server --> MLS[services/ml_service.py]
+
+    MLS -->|voice| STT[services/audio/transcribe.py<br/>Gemini speech-to-text]
+    STT --> TextPipe
+    MLS -->|image| AIDet[HF Inference API<br/>Organika/sdxl-detector]
+    MLS -->|image| OCR[services/ocr<br/>Gemini Vision + tesseract fallback]
+    OCR --> TextPipe
+    MLS -->|text| TextPipe[src/pipelines/text/pipeline.py]
+
+    TextPipe --> Claim[claim_extractor.py]
+    Claim --> Search[fact_check_search.py<br/>PIB · Alt News · BOOM · Google FactCheck · Google News RSS]
+    Search --> Match[claim_matcher.py]
+
+    AIDet --> Fuse[src/verdict/evidence_aggregator.py]
+    Match --> Fuse
+    Fuse --> Adapter[UI/src/adapter.py<br/>card JSON + bilingual explanation]
+    Adapter -->|SSE verdict event| Browser
 ```
 
-## Latency Budgets & Timeouts
+## SSE protocol
 
-| Pipeline Component | Max Timeout | Strategy / Fallback |
+`GET /api/check/{id}/stream` emits, in order:
+
+| Event | Payload | Meaning |
 |---|---|---|
-| Image Analysis | 30.0s | `asyncio.gather` with PIL ImageChops acceleration |
-| Text Claim Extraction | 25.0s | Rule-based regex NLP extractor fallback |
-| Reverse Search | 15.0s | Recycled metadata heuristic fallback |
-| Verdict Card Generation | 15.0s | Curated bilingual template fallback |
-| Total Request Budget | < 60.0s | Async SSE streaming updates |
+| `progress` | `{step, status, message}` | `step` ∈ `analyze` / `search` / `verdict`; `status` ∈ `running` / `completed` / `skipped` / `error`. Steps only ever move forward. |
+| `verdict` | the card (see below) | Success — exactly one per check. |
+| `failed` | `{error}` | Analysis failed or timed out. Distinct from the transport-level `error` event `EventSource` fires on any disconnect. |
+| `done` | `{}` | Stream finished; the client closes the connection. |
+
+## Verdict card
+
+```json
+{
+  "verdict": "likely_true | likely_false | unverifiable | ai_generated",
+  "confidence": 0.0,
+  "confidence_level": "HIGH | MODERATE | LOW",
+  "explanation_en": "…", "explanation_hi": "…",
+  "claim": "what was actually checked", "claim_label": "Claim read from the image",
+  "sources": [{ "source_name": "", "source_url": "", "verdict": "", "snippet": "" }],
+  "image_flags": ["AI_GENERATED"],
+  "disclaimer": "…",
+  "meta": { "type": "", "image_ai_score": 0.0, "language": "", "latency_ms": 0 }
+}
+```
+
+Backend verdicts are `UPPER_SNAKE` (`src/models/schemas.py`); the card uses
+lower-case slugs. `UI/src/adapter.py` is the only place that translates between them.
+
+**Verdict rules.** When a claim was checked, the claim's verdict wins — an
+AI-generated picture does not make an attached claim false, and a real photo does
+not make one true. The AI-image signal always travels separately in `image_flags`.
+A bare image with no readable text and no claim is reported as `ai_generated` (when
+the detector is ≥ 0.70 confident) or `unverifiable` — never "true", because nothing
+was verified.
+
+## Timeouts
+
+| Stage | Budget | Source |
+|---|---|---|
+| Text pipeline | 45s | `settings.text_pipeline_timeout` |
+| Whole check | 58s | `settings.total_timeout` (enforced in `_run_analysis`) |
+| Browser socket | 90s | dead-socket guard in `frontend/js/api.js` |
+
+Uploads are written to `UI/uploads/` and deleted in the `finally` of every check —
+the footer's "all uploads are deleted after analysis" is enforced in code.

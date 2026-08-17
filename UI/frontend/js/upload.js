@@ -1,5 +1,10 @@
 let currentFile = null;
 
+// app.js owns the on-screen error banner; blocking alert() dialogs are avoided.
+function reportError(message) {
+    document.dispatchEvent(new CustomEvent('satya:error', { detail: message }));
+}
+
 export function initUpload() {
     const dropzone = document.getElementById('dropzone');
     const fileInput = document.getElementById('image-input');
@@ -71,12 +76,12 @@ function handleDrop(e) {
 function handleFile(file) {
     const validTypes = ['image/jpeg', 'image/png', 'image/webp'];
     if (!validTypes.includes(file.type)) {
-        alert('Invalid file type. Please upload a JPG, PNG, or WEBP image.');
+        reportError('That file type is not supported. Use a JPG, PNG, or WEBP image.');
         return;
     }
 
     if (file.size > 10 * 1024 * 1024) {
-        alert('File is too large. Maximum size is 10MB.');
+        reportError('That image is larger than 10 MB. Try a smaller one.');
         return;
     }
 

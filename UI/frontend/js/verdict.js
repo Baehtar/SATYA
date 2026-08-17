@@ -1,3 +1,30 @@
+// Verdict slugs come from UI/src/adapter.py.
+const VERDICT_DISPLAY = {
+    likely_true:        { emoji: '🟢', label: 'Likely True',        cls: 'true' },
+    likely_false:       { emoji: '🔴', label: 'Likely False',       cls: 'false' },
+    ai_generated:       { emoji: '🤖', label: 'AI Generated',       cls: 'ai' },
+    manipulated:        { emoji: '✂️', label: 'Manipulated',        cls: 'ai' },
+    misleading_context: { emoji: '🟠', label: 'Misleading Context', cls: 'ai' },
+    unverifiable:       { emoji: '🟡', label: 'Unverifiable',       cls: 'unverifiable' },
+};
+
+const FLAG_LABELS = {
+    AI_GENERATED: 'AI-generated image detected',
+    MANIPULATED: 'Image manipulation detected',
+    RECYCLED: 'Recycled / old image',
+};
+
+// Backend statuses → CSS classes on .step
+const STATUS_CLASS = {
+    pending: 'pending',
+    running: 'running',
+    started: 'running',
+    completed: 'done',
+    done: 'done',
+    skipped: 'skipped',
+    error: 'error',
+};
+
 export function renderProgress(steps) {
     const stepper = document.getElementById('stepper');
     stepper.innerHTML = '';
@@ -7,74 +34,53 @@ export function renderProgress(steps) {
         stepEl.className = 'step pending';
         stepEl.id = `step-${step.id}`;
         stepEl.style.animationDelay = `${index * 100}ms`;
-        
-        stepEl.innerHTML = `
-            <div class="step-icon"></div>
-            <div class="step-label">${step.label}</div>
-        `;
+        stepEl.dataset.label = step.label;
+
+        const icon = document.createElement('div');
+        icon.className = 'step-icon';
+        const label = document.createElement('div');
+        label.className = 'step-label';
+        label.textContent = step.label;
+
+        stepEl.append(icon, label);
         stepper.appendChild(stepEl);
     });
 }
 
 export function updateProgressStep(stepId, status, message) {
-    // Map backend step IDs to frontend step IDs
-    const stepMap = {
-        'image_analysis': 'analyze',
-        'text_analysis': 'analyze',
-        'audio_analysis': 'analyze',
-        'reverse_search': 'search',
-        'fact_check': 'search',
-        'generating_verdict': 'verdict',
-    };
-    const mappedId = stepMap[stepId] || stepId;
-    
-    // Map backend statuses to CSS classes
-    const statusMap = {
-        'started': 'running',
-        'running': 'running',
-        'completed': 'done',
-        'done': 'done',
-        'error': 'error',
-        'pending': 'pending',
-    };
-    const mappedStatus = statusMap[status] || status;
-
-    const stepEl = document.getElementById(`step-${mappedId}`);
+    const stepEl = document.getElementById(`step-${stepId}`);
     if (!stepEl) return;
 
-    stepEl.className = `step ${mappedStatus}`;
-    
+    const statusClass = STATUS_CLASS[status] || 'running';
+    stepEl.className = `step ${statusClass}`;
+
     const iconEl = stepEl.querySelector('.step-icon');
-    if (mappedStatus === 'done') {
-        iconEl.innerHTML = '✓';
-    } else if (mappedStatus === 'error') {
-        iconEl.innerHTML = '✕';
+    if (statusClass === 'done') {
+        iconEl.textContent = '✓';
+    } else if (statusClass === 'error') {
+        iconEl.textContent = '✕';
+    } else if (statusClass === 'skipped') {
+        iconEl.textContent = '–';
     } else {
-        iconEl.innerHTML = '';
+        iconEl.textContent = '';
     }
 
-    if (message) {
-        stepEl.querySelector('.step-label').textContent = message;
-    }
+    // Keep the step's own name when a stage reports no message of its own.
+    stepEl.querySelector('.step-label').textContent = message || stepEl.dataset.label;
 }
 
 export function hideVerdict() {
     const section = document.getElementById('verdict-section');
     section.classList.add('hidden');
-    const card = section.querySelector('.verdict-card');
-    card.classList.remove('show');
+    section.querySelector('.verdict-card').classList.remove('show');
 }
 
 export function showVerdict() {
     const section = document.getElementById('verdict-section');
     section.classList.remove('hidden');
-    
-    // Trigger animation after render
+
     requestAnimationFrame(() => {
-        const card = section.querySelector('.verdict-card');
-        card.classList.add('show');
-        
-        // Scroll to verdict smoothly
+        section.querySelector('.verdict-card').classList.add('show');
         setTimeout(() => {
             section.scrollIntoView({ behavior: 'smooth', block: 'center' });
         }, 100);
@@ -85,90 +91,93 @@ export function resetVerdict() {
     const fill = document.getElementById('confidence-fill');
     fill.style.width = '0%';
     fill.className = 'confidence-fill';
-    
-    document.getElementById('image-flags').innerHTML = '';
-    document.getElementById('image-flags').classList.add('hidden');
-    
+
+    const flags = document.getElementById('image-flags');
+    flags.innerHTML = '';
+    flags.classList.add('hidden');
+
+    document.getElementById('claim-box').classList.add('hidden');
     document.getElementById('sources-list').innerHTML = '';
+    document.getElementById('verdict-meta').textContent = '';
 }
 
 export function renderVerdict(data) {
-    const { verdict, confidence, confidence_level, explanation_en, explanation_hi, sources, image_flags, disclaimer } = data;
-    
-    // Verdict Badge — map backend enum values to display
+    const display = VERDICT_DISPLAY[data.verdict] || VERDICT_DISPLAY.unverifiable;
+
+    // ── Badge ────────────────────────────────────────────────────────────────
     const badge = document.getElementById('verdict-badge');
-    badge.className = 'verdict-badge'; // reset
-    
-    let emoji = '🟡';
-    let label = 'UNVERIFIABLE';
-    let statusClass = 'unverifiable';
-    
-    if (verdict === 'likely_true') {
-        emoji = '🟢';
-        label = 'LIKELY TRUE';
-        statusClass = 'true';
-    } else if (verdict === 'likely_false') {
-        emoji = '🔴';
-        label = 'LIKELY FALSE';
-        statusClass = 'false';
-    }
-    
-    badge.classList.add(statusClass);
-    badge.innerHTML = `${emoji} ${label}`;
-    
-    // Confidence Bar — backend sends 0.0-1.0, convert to percentage
-    const confidencePct = Math.round(confidence * 100);
-    document.getElementById('confidence-label').textContent = `Confidence: ${confidencePct}%`;
+    badge.className = `verdict-badge ${display.cls}`;
+    badge.textContent = `${display.emoji} ${display.label}`;
+
+    // ── Confidence (backend sends 0.0–1.0) ───────────────────────────────────
+    const pct = Math.round((data.confidence || 0) * 100);
+    const level = data.confidence_level ? ` (${data.confidence_level.toLowerCase()})` : '';
+    document.getElementById('confidence-label').textContent = `Confidence: ${pct}%${level}`;
+
     const fill = document.getElementById('confidence-fill');
-    fill.className = `confidence-fill ${statusClass}`;
-    
-    // Delay width animation slightly for better effect
-    setTimeout(() => {
-        fill.style.width = `${confidencePct}%`;
-    }, 100);
-    
-    // Explanations
-    document.getElementById('explanation-en').textContent = explanation_en;
-    document.getElementById('explanation-hi').textContent = explanation_hi;
-    
-    // Sources — backend sends FactCheckMatch objects with source_name, source_url
+    fill.className = `confidence-fill ${display.cls}`;
+    setTimeout(() => { fill.style.width = `${pct}%`; }, 100);
+
+    // ── What was actually checked (claim / OCR text / transcript) ────────────
+    const claimBox = document.getElementById('claim-box');
+    if (data.claim) {
+        document.getElementById('claim-label').textContent = data.claim_label || 'Claim checked';
+        document.getElementById('claim-text').textContent = data.claim;
+        claimBox.classList.remove('hidden');
+    } else {
+        claimBox.classList.add('hidden');
+    }
+
+    // ── Explanations ─────────────────────────────────────────────────────────
+    document.getElementById('explanation-en').textContent = data.explanation_en || '';
+    document.getElementById('explanation-hi').textContent = data.explanation_hi || '';
+
+    // ── Sources ──────────────────────────────────────────────────────────────
     const sourcesList = document.getElementById('sources-list');
     sourcesList.innerHTML = '';
-    if (sources && sources.length > 0) {
-        sources.forEach(source => {
+    if (data.sources && data.sources.length > 0) {
+        data.sources.forEach(source => {
             const a = document.createElement('a');
             a.href = source.source_url;
             a.className = 'source-pill';
             a.target = '_blank';
             a.rel = 'noopener noreferrer';
             a.textContent = source.source_name;
+            if (source.snippet) a.title = source.snippet;
             sourcesList.appendChild(a);
         });
     } else {
-        sourcesList.innerHTML = '<span style="color: var(--color-text-muted); font-size: 13px;">No direct sources found.</span>';
+        const empty = document.createElement('span');
+        empty.className = 'sources-empty';
+        empty.textContent = 'No fact-check or news coverage matched this claim.';
+        sourcesList.appendChild(empty);
     }
-    
-    // Image Flags
+
+    // ── Image flags ──────────────────────────────────────────────────────────
     const flagsContainer = document.getElementById('image-flags');
     flagsContainer.innerHTML = '';
-    if (image_flags && image_flags.length > 0) {
+    if (data.image_flags && data.image_flags.length > 0) {
         flagsContainer.classList.remove('hidden');
-        image_flags.forEach(flag => {
+        data.image_flags.forEach(flag => {
             const span = document.createElement('span');
             span.className = 'flag-tag';
-            // Map technical flags to user-friendly labels
-            const flagLabels = {
-                'AI_GENERATED': 'AI-Generated Image Detected',
-                'MANIPULATED': 'Image Manipulation Detected',
-                'RECYCLED': 'Recycled / Old Image',
-            };
-            span.innerHTML = `⚠️ ${flagLabels[flag] || flag}`;
+            span.textContent = `⚠️ ${FLAG_LABELS[flag] || flag}`;
             flagsContainer.appendChild(span);
         });
     } else {
         flagsContainer.classList.add('hidden');
     }
-    
-    // Disclaimer
-    document.getElementById('disclaimer-text').textContent = disclaimer || 'This assessment is generated by AI and may contain errors. Always verify critical information from official sources.';
+
+    // ── Footer ───────────────────────────────────────────────────────────────
+    document.getElementById('disclaimer-text').textContent = data.disclaimer ||
+        'This assessment is generated by AI and may contain errors. Always verify critical information from official sources.';
+
+    const meta = data.meta || {};
+    const bits = [];
+    if (meta.latency_ms) bits.push(`checked in ${(meta.latency_ms / 1000).toFixed(1)}s`);
+    if (meta.language) bits.push(meta.language.toLowerCase().replace('_', ' '));
+    if (meta.type === 'image' || meta.type === 'mixed') {
+        bits.push(`AI-image score ${Math.round((meta.image_ai_score || 0) * 100)}%`);
+    }
+    document.getElementById('verdict-meta').textContent = bits.join(' · ');
 }
