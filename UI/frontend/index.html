@@ -126,6 +126,31 @@
                             <button class="text-btn" id="rerecord-btn">Re-record</button>
                         </div>
                     </div>
+
+                    <div class="audio-upload-divider">
+                        <span>or upload a file</span>
+                    </div>
+
+                    <div class="audio-dropzone" id="audio-dropzone" role="button" tabindex="0" aria-label="Upload audio or video file">
+                        <input type="file" id="audio-file-input" accept="audio/*,video/mp4,video/quicktime,video/webm,video/x-matroska,video/x-msvideo" class="sr-only">
+                        <div id="audio-dropzone-content">
+                            <svg class="upload-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
+                            <p class="audio-dropzone-label">Drop audio or video here, or <span class="audio-browse-link">browse</span></p>
+                            <p class="audio-dropzone-hint">MP3, WAV, OGG, FLAC, AAC, M4A · MP4, MOV, WebM, MKV — max 25 MB audio / 50 MB video</p>
+                        </div>
+                        <div class="audio-file-preview hidden" id="audio-file-preview">
+                            <div class="audio-file-icon">
+                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"></path><circle cx="6" cy="18" r="3"></circle><circle cx="18" cy="16" r="3"></circle></svg>
+                            </div>
+                            <div class="audio-file-info">
+                                <span class="audio-file-name" id="audio-file-name"></span>
+                                <span class="audio-file-meta" id="audio-file-meta"></span>
+                            </div>
+                            <button class="remove-btn" id="audio-remove-btn" aria-label="Remove file">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                            </button>
+                        </div>
+                    </div>
                 </div>
 
                 <div class="error-banner hidden" id="error-banner" role="alert" aria-live="polite"></div>

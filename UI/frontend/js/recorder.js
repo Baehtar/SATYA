@@ -9,6 +9,9 @@ let analyser;
 let dataArray;
 let animationId;
 
+// Uploaded file (audio or video) — mutually exclusive with the mic recorder.
+let uploadedFile = null;
+
 // OGG/Opus first: the backend can send it to the speech-to-text API as-is,
 // while WebM needs an ffmpeg transcode on the server.
 const PREFERRED_TYPES = [
@@ -17,6 +20,20 @@ const PREFERRED_TYPES = [
     { mime: 'audio/webm;codecs=opus', ext: 'webm' },
     { mime: 'audio/webm', ext: 'webm' },
 ];
+
+// MIME types accepted for direct audio upload
+const ACCEPTED_AUDIO_TYPES = [
+    'audio/mpeg', 'audio/mp3', 'audio/wav', 'audio/wave', 'audio/ogg',
+    'audio/flac', 'audio/aac', 'audio/mp4', 'audio/x-m4a', 'audio/m4a',
+    'audio/aiff', 'audio/x-aiff',
+];
+// MIME types accepted for video upload (audio will be extracted server-side)
+const ACCEPTED_VIDEO_TYPES = [
+    'video/mp4', 'video/quicktime', 'video/webm', 'video/x-matroska',
+    'video/x-msvideo', 'video/mpeg', 'video/3gpp',
+];
+const ACCEPTED_AUDIO_EXTS = ['.mp3','.wav','.ogg','.flac','.aac','.m4a','.aiff','.opus'];
+const ACCEPTED_VIDEO_EXTS = ['.mp4','.mov','.webm','.mkv','.avi','.mpeg','.mpg','.3gp'];
 
 function pickRecordingType() {
     if (typeof MediaRecorder === 'undefined' || !MediaRecorder.isTypeSupported) {
@@ -29,6 +46,29 @@ function cssVar(name, fallback) {
     const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
     return value || fallback;
 }
+
+function reportError(message) {
+    document.dispatchEvent(new CustomEvent('satya:error', { detail: message }));
+}
+
+// ── File type helpers ─────────────────────────────────────────────────────────
+
+function _isAudioType(file) {
+    const ext = '.' + file.name.split('.').pop().toLowerCase();
+    return ACCEPTED_AUDIO_TYPES.includes(file.type) || ACCEPTED_AUDIO_EXTS.includes(ext);
+}
+
+function _isVideoType(file) {
+    const ext = '.' + file.name.split('.').pop().toLowerCase();
+    return ACCEPTED_VIDEO_TYPES.includes(file.type) || ACCEPTED_VIDEO_EXTS.includes(ext);
+}
+
+function _formatBytes(bytes) {
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(0) + ' KB';
+    return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+}
+
+// ── Recorder (microphone) ─────────────────────────────────────────────────────
 
 export function initRecorder() {
     const recordBtn = document.getElementById('record-btn');
@@ -55,6 +95,9 @@ export function initRecorder() {
 }
 
 async function startRecording() {
+    // If a file was uploaded, clear it first — mic takes priority.
+    if (uploadedFile) resetUploadedFile();
+
     try {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         const type = pickRecordingType();
@@ -178,4 +221,103 @@ export function resetRecorder() {
 
     const canvas = document.getElementById('waveform-canvas');
     canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
+}
+
+// ── Audio/Video file upload ───────────────────────────────────────────────────
+
+export function initAudioUpload() {
+    const dropzone = document.getElementById('audio-dropzone');
+    const fileInput = document.getElementById('audio-file-input');
+    const removeBtn = document.getElementById('audio-remove-btn');
+
+    if (!dropzone || !fileInput) return; // graceful: elements may not exist yet
+
+    // Drag and drop
+    ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(evt => {
+        dropzone.addEventListener(evt, e => { e.preventDefault(); e.stopPropagation(); }, false);
+    });
+    ['dragenter', 'dragover'].forEach(evt => {
+        dropzone.addEventListener(evt, () => dropzone.classList.add('drag-active'), false);
+    });
+    ['dragleave', 'drop'].forEach(evt => {
+        dropzone.addEventListener(evt, () => dropzone.classList.remove('drag-active'), false);
+    });
+    dropzone.addEventListener('drop', e => {
+        const file = e.dataTransfer.files && e.dataTransfer.files[0];
+        if (file) _handleAudioFile(file);
+    }, false);
+
+    // Click to browse
+    dropzone.addEventListener('click', e => {
+        if (removeBtn && (e.target === removeBtn || removeBtn.contains(e.target))) return;
+        fileInput.click();
+    });
+
+    fileInput.addEventListener('change', function () {
+        if (this.files && this.files[0]) _handleAudioFile(this.files[0]);
+    });
+
+    if (removeBtn) {
+        removeBtn.addEventListener('click', e => {
+            e.stopPropagation();
+            resetUploadedFile();
+        });
+    }
+}
+
+function _handleAudioFile(file) {
+    const isAudio = _isAudioType(file);
+    const isVideo = _isVideoType(file);
+
+    if (!isAudio && !isVideo) {
+        reportError('Unsupported file type. Upload an audio file (MP3, WAV, OGG, FLAC, AAC, M4A) or a video file (MP4, MOV, WebM, MKV).');
+        return;
+    }
+
+    const maxBytes = isVideo ? 50 * 1024 * 1024 : 25 * 1024 * 1024;
+    const limitLabel = isVideo ? '50 MB' : '25 MB';
+    if (file.size > maxBytes) {
+        reportError(`That file is larger than ${limitLabel}. Try a smaller one.`);
+        return;
+    }
+
+    // If mic has a recording, clear it — file upload takes priority.
+    if (audioBlob) resetRecorder();
+
+    uploadedFile = file;
+    _showFilePreview(file, isVideo);
+}
+
+function _showFilePreview(file, isVideo) {
+    const dropzoneContent = document.getElementById('audio-dropzone-content');
+    const previewEl = document.getElementById('audio-file-preview');
+    const nameEl = document.getElementById('audio-file-name');
+    const metaEl = document.getElementById('audio-file-meta');
+
+    if (!previewEl) return;
+
+    if (nameEl) nameEl.textContent = file.name;
+    if (metaEl) {
+        const typeLabel = isVideo ? '🎬 Video (audio will be extracted)' : '🎵 Audio';
+        metaEl.textContent = `${typeLabel} · ${_formatBytes(file.size)}`;
+    }
+
+    if (dropzoneContent) dropzoneContent.classList.add('hidden');
+    previewEl.classList.remove('hidden');
+}
+
+export function getUploadedFile() {
+    return uploadedFile;
+}
+
+export function resetUploadedFile() {
+    uploadedFile = null;
+    const fileInput = document.getElementById('audio-file-input');
+    if (fileInput) fileInput.value = '';
+
+    const dropzoneContent = document.getElementById('audio-dropzone-content');
+    const previewEl = document.getElementById('audio-file-preview');
+
+    if (dropzoneContent) dropzoneContent.classList.remove('hidden');
+    if (previewEl) previewEl.classList.add('hidden');
 }

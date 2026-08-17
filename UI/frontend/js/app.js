@@ -1,5 +1,5 @@
 import { initUpload, getImageFile, resetUpload, getCaption } from './upload.js';
-import { initRecorder, getAudioBlob, getAudioFilename, resetRecorder } from './recorder.js';
+import { initRecorder, initAudioUpload, getAudioBlob, getAudioFilename, getUploadedFile, resetRecorder, resetUploadedFile } from './recorder.js';
 import { submitCheck, streamProgress } from './api.js';
 import { renderVerdict, resetVerdict, renderProgress, updateProgressStep, hideVerdict, showVerdict } from './verdict.js';
 
@@ -22,6 +22,7 @@ const STEPS_BY_MODE = {
 function init() {
     initUpload();
     initRecorder();
+    initAudioUpload();
 
     const tabBtns = document.querySelectorAll('.tab-btn');
     const tabContents = document.querySelectorAll('.tab-content');
@@ -136,11 +137,22 @@ function init() {
             formData.append('text', text);
         } else if (currentTab === 'voice') {
             const audio = getAudioBlob();
-            if (!audio) {
-                showError('Record a voice note first.');
+            const uploadedFile = getUploadedFile();
+
+            if (uploadedFile) {
+                // Uploaded audio or video file — send on the right field.
+                const isVideo = uploadedFile.type.startsWith('video/');
+                if (isVideo) {
+                    formData.append('video', uploadedFile, uploadedFile.name);
+                } else {
+                    formData.append('audio', uploadedFile, uploadedFile.name);
+                }
+            } else if (audio) {
+                formData.append('audio', audio, getAudioFilename());
+            } else {
+                showError('Record a voice note or upload an audio / video file first.');
                 return;
             }
-            formData.append('audio', audio, getAudioFilename());
         }
 
         startCheck(formData);
@@ -198,6 +210,7 @@ function init() {
         resetCheckingState();
         resetUpload();
         resetRecorder();
+        resetUploadedFile();
         textInput.value = '';
         applyMode('fake_news');
         clearError();

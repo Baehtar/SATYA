@@ -34,6 +34,7 @@ from fastapi.staticfiles import StaticFiles
 
 from src.config import settings
 from services.ml_service import check_image, check_mixed, check_text, check_voice
+from services.audio.convert import extract_audio_from_video
 from UI.src.adapter import build_card
 
 logging.basicConfig(level=settings.log_level)
@@ -46,6 +47,7 @@ UPLOAD_DIR = UI_DIR / "uploads"
 
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 MAX_AUDIO_BYTES = 25 * 1024 * 1024
+MAX_VIDEO_BYTES = 50 * 1024 * 1024
 JOB_TTL_SECONDS = 600
 
 # Pipeline step ids (services/ml_service.py) → the three steps the UI shows.
@@ -53,6 +55,7 @@ STEP_MAP = {
     "image_analysis": "analyze",
     "text_analysis": "analyze",
     "audio_analysis": "analyze",
+    "video_analysis": "analyze",
     "fact_check": "search",
     "generating_verdict": "verdict",
 }
@@ -155,6 +158,7 @@ async def _run_analysis(
     image_path: Optional[str],
     audio_path: Optional[str],
     mode: str,
+    extra_paths: Optional[list] = None,
 ) -> None:
     """Runs the shared pipeline, streaming progress into `queue`."""
     start = time.monotonic()
@@ -225,7 +229,8 @@ async def _run_analysis(
         await queue.put(("failed", {"error": str(e)}))
     finally:
         # The footer promises uploads are deleted after analysis — keep that promise.
-        for path in (image_path, audio_path):
+        all_paths = [image_path, audio_path] + (extra_paths or [])
+        for path in all_paths:
             if path and os.path.exists(path):
                 try:
                     os.remove(path)
@@ -250,6 +255,7 @@ async def create_check(
     text: Optional[str] = Form(default=None),
     image: Optional[UploadFile] = File(default=None),
     audio: Optional[UploadFile] = File(default=None),
+    video: Optional[UploadFile] = File(default=None),
     mode: str = Form(default=MODE_FAKE_NEWS),
 ) -> JSONResponse:
     """Accepts the submission and starts the analysis; returns a job id to stream."""
@@ -259,8 +265,8 @@ async def create_check(
         return JSONResponse({"error": f"Unknown mode '{mode}'."}, status_code=422)
 
     text = (text or "").strip()
-    if not text and image is None and audio is None:
-        return JSONResponse({"error": "Send text, an image, or a voice recording."}, status_code=422)
+    if not text and image is None and audio is None and video is None:
+        return JSONResponse({"error": "Send text, an image, a voice recording, or a video."}, status_code=422)
 
     if mode == MODE_AI_IMAGE:
         if image is None:
@@ -268,12 +274,15 @@ async def create_check(
         # Nothing else is analysed in this mode; don't pretend otherwise.
         text = ""
         audio = None
+        video = None
 
     job_id = str(uuid.uuid4())
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
     image_path: Optional[str] = None
     audio_path: Optional[str] = None
+    video_path: Optional[str] = None
+    extracted_audio_path: Optional[str] = None
 
     try:
         if image is not None:
@@ -290,16 +299,38 @@ async def create_check(
                     {"error": f"Expected audio, got {audio.content_type or 'unknown type'}."},
                     status_code=422,
                 )
-            audio_path = await _save_upload(audio, job_id, MAX_AUDIO_BYTES)
+            audio_path = await _save_upload(audio, job_id + "_audio", MAX_AUDIO_BYTES)
+
+        if video is not None:
+            if not (video.content_type or "").startswith("video/"):
+                return JSONResponse(
+                    {"error": f"Expected a video file, got {video.content_type or 'unknown type'}."},
+                    status_code=422,
+                )
+            video_path = await _save_upload(video, job_id + "_video", MAX_VIDEO_BYTES)
+            # Extract audio from the video; the video itself is not needed by the pipeline.
+            extracted_audio_path = await extract_audio_from_video(video_path)
+            if not extracted_audio_path:
+                return JSONResponse(
+                    {"error": "Could not extract audio from the video. Make sure the file contains an audio track and that ffmpeg is installed."},
+                    status_code=422,
+                )
+            # Use the extracted WAV as the audio path for the pipeline.
+            audio_path = extracted_audio_path
+
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=413)
 
     job = Job()
-    job.task = asyncio.create_task(_run_analysis(job_id, job.queue, text, image_path, audio_path, mode))
+    job.task = asyncio.create_task(
+        _run_analysis(job_id, job.queue, text, image_path, audio_path, mode,
+                      extra_paths=[video_path, extracted_audio_path])
+    )
     _jobs[job_id] = job
 
     log.info("check_started", job_id=job_id, mode=mode, has_text=bool(text),
-             has_image=bool(image_path), has_audio=bool(audio_path))
+             has_image=bool(image_path), has_audio=bool(audio_path),
+             has_video=bool(video_path))
     return JSONResponse({"id": job_id})
 
 
