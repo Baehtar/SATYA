@@ -1,4 +1,4 @@
- """
+"""
 src/verdict/aggregator.py — Evidence aggregator.
 Owned by: Person 3
 
