@@ -129,6 +129,13 @@ async def generate_card(
     )
 
 
+def fallback_explanations(verdict: Verdict) -> tuple[str, str]:
+    """Curated (english, hindi) text for a verdict — used whenever Gemini is
+    unavailable. Shared with the web UI card adapter so both surfaces say the
+    same thing."""
+    return _fallback_english(verdict), _fallback_hindi(verdict)
+
+
 def _fallback_english(verdict: Verdict) -> str:
     """Static fallback if Gemini fails."""
     return {

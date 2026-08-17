@@ -62,7 +62,7 @@ def run_benchmark():
         print("[OK] Server Health Check: OK")
     except Exception as e:
         print(f"[FAIL] Server connection failed: {e}")
-        print("Please start the server first using `python run.py`!")
+        print("Start the server first: python -m UI.run (from the repo root)")
         sys.exit(1)
 
     passed = 0
@@ -83,7 +83,7 @@ def run_benchmark():
         
         # Stream SSE results
         verdict_received = None
-        with httpx.stream("GET", f"{API_BASE}/api/check/{check_id}/stream", timeout=30.0) as stream:
+        with httpx.stream("GET", f"{API_BASE}/api/check/{check_id}/stream", timeout=90.0) as stream:
             for line in stream.iter_lines():
                 if line.startswith("data: "):
                     data_str = line[6:]

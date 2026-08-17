@@ -57,12 +57,23 @@ cp .env.example .env
 | `SERPAPI_KEY` | [serpapi.com](https://serpapi.com) (free: 100 searches/month) |
 | `GOOGLE_FACTCHECK_API_KEY` | [Google Cloud Console](https://console.cloud.google.com/) → Fact Check Tools API (free) |
 
-### 5. Run the bot
+### 5. Run the Telegram bot
 ```bash
-python -m src.bot.telegram_bot
+python main.py
 ```
 
-### 6. Run the dashboard (optional)
+### 6. Run the web UI (optional)
+```bash
+python -m UI.run
+# Open http://localhost:8000
+```
+
+The web UI is a second front-end over the **same** analysis code the bot uses
+(`services/ml_service.py`) — image, text and voice checks with live progress and a
+bilingual verdict card. `GET /api/health` reports which API keys are configured,
+which is the quickest way to see why a result came back degraded.
+
+### 7. Run the trend dashboard (optional)
 ```bash
 uvicorn src.dashboard.app:app --port 8080 --reload
 # Open http://localhost:8080
@@ -107,6 +118,18 @@ satya/
 │   └── dashboard/
 │       ├── app.py                   # FastAPI trend dashboard API
 │       └── static/index.html        # Dashboard frontend
+├── bot/                             # The running Telegram bot (entry: main.py)
+│   ├── handlers.py                  # Commands, menu, message handling
+│   ├── router.py                    # Message type detection
+│   └── response.py                  # Verdict → Telegram HTML card
+├── services/                        # Shared backend used by BOTH front-ends
+│   ├── ml_service.py                # check_text / check_image / check_voice / check_mixed
+│   ├── ocr/                         # Multilingual OCR (Gemini Vision + tesseract fallback)
+│   └── audio/                       # Voice-note speech-to-text
+├── UI/                              # Web front-end (entry: python -m UI.run)
+│   ├── src/server.py                # FastAPI + SSE progress streaming
+│   ├── src/adapter.py               # Backend result → verdict-card JSON
+│   └── frontend/                    # Single-page app (no build step)
 ├── tests/
 │   └── test_judging_set.py          # 8-item judging evaluation runner
 ├── docs/

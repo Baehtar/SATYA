@@ -1,66 +1,77 @@
 export async function submitCheck(formData) {
+    const response = await fetch('/api/check', {
+        method: 'POST',
+        body: formData
+    });
+
+    let data = null;
     try {
-        const response = await fetch('/api/check', {
-            method: 'POST',
-            body: formData
-        });
-
-        if (!response.ok) {
-            throw new Error(`HTTP error! status: ${response.status}`);
-        }
-
-        const data = await response.json();
-        return data;
-    } catch (error) {
-        console.error('Error submitting check:', error);
-        throw error;
+        data = await response.json();
+    } catch (err) {
+        data = null;
     }
+
+    if (!response.ok) {
+        // The server explains refusals (too large, wrong type, nothing sent).
+        throw new Error((data && data.error) || `Server error (${response.status})`);
+    }
+
+    return data;
 }
 
 export function streamProgress(checkId, onProgress, onVerdict, onError) {
     const eventSource = new EventSource(`/api/check/${checkId}/stream`);
 
-    let timeout = setTimeout(() => {
+    let settled = false;
+    // The whole check is budgeted server-side; this only catches a dead socket.
+    let timeout = setTimeout(() => finish(() => onError('The check timed out. Please try again.')), 90000);
+
+    function finish(callback) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
         eventSource.close();
-        onError('Connection timed out');
-    }, 60000); // 60s timeout
+        if (callback) callback();
+    }
 
     eventSource.addEventListener('progress', (e) => {
         try {
-            const data = JSON.parse(e.data);
-            onProgress(data);
+            onProgress(JSON.parse(e.data));
         } catch (err) {
-            console.error('Error parsing progress:', err);
+            console.error('Bad progress payload:', err);
         }
     });
 
     eventSource.addEventListener('verdict', (e) => {
-        clearTimeout(timeout);
+        let card;
         try {
-            const data = JSON.parse(e.data);
-            onVerdict(data);
-            eventSource.close();
+            card = JSON.parse(e.data);
         } catch (err) {
-            console.error('Error parsing verdict:', err);
-            onError('Failed to parse verdict');
+            finish(() => onError('The verdict could not be read.'));
+            return;
+        }
+        finish(() => onVerdict(card));
+    });
+
+    // Named server-side failure — distinct from the transport-level 'error'
+    // event that EventSource fires on any disconnect, including a clean one.
+    eventSource.addEventListener('failed', (e) => {
+        let message = 'The check could not be completed.';
+        try {
+            message = JSON.parse(e.data).error || message;
+        } catch (err) { /* keep the default */ }
+        finish(() => onError(message));
+    });
+
+    eventSource.addEventListener('done', () => finish());
+
+    eventSource.addEventListener('error', () => {
+        // Fires when the stream closes after 'done' too — only surface it if
+        // we never received a verdict.
+        if (eventSource.readyState === EventSource.CLOSED) {
+            finish(() => onError('Lost connection to the server.'));
         }
     });
 
-    eventSource.addEventListener('error', (e) => {
-        clearTimeout(timeout);
-        let msg = 'Stream error';
-        try {
-            if (e.data) {
-                const data = JSON.parse(e.data);
-                msg = data.error || msg;
-            }
-        } catch (err) {}
-        onError(msg);
-        eventSource.close();
-    });
-
-    eventSource.addEventListener('done', () => {
-        clearTimeout(timeout);
-        eventSource.close();
-    });
+    return () => finish();
 }

@@ -14,8 +14,13 @@ from src.pipelines.text.claim_matcher import match_and_summarise
 log = structlog.get_logger(__name__)
 
 
-async def run_text_pipeline(request: CheckRequest) -> ClaimAnalysis:
-    """Main entry point for the multilingual text claim pipeline."""
+async def run_text_pipeline(request: CheckRequest, progress_callback=None) -> ClaimAnalysis:
+    """
+    Main entry point for the multilingual text claim pipeline.
+
+    progress_callback(message: str, step: str) — optional async hook so callers
+    (web UI, bot) can stream stage-by-stage progress to the user.
+    """
     start = time.monotonic()
     text = request.text_content or ""
     log.info("text_pipeline_start", request_id=request.request_id, text_len=len(text))
@@ -31,6 +36,8 @@ async def run_text_pipeline(request: CheckRequest) -> ClaimAnalysis:
     try:
         async with asyncio.timeout(settings.text_pipeline_timeout):
             # Step 1: Language Detection & Claim Extraction
+            if progress_callback:
+                await progress_callback("📝 Extracting the core claim…", "text_analysis")
             claim_info = await extract_claim(text)
 
             # Uncheckable opinion / satire handling
@@ -47,6 +54,10 @@ async def run_text_pipeline(request: CheckRequest) -> ClaimAnalysis:
                 )
 
             # Step 2: Search Fact-Check Sources (PIB, Alt News, BOOM)
+            if progress_callback:
+                await progress_callback(
+                    "🔎 Searching PIB, Alt News, BOOM & Google News…", "fact_check"
+                )
             matches = await search_fact_checks(
                 claim=claim_info.get("claim", ""),
                 keywords=claim_info.get("keywords", []),
@@ -55,6 +66,11 @@ async def run_text_pipeline(request: CheckRequest) -> ClaimAnalysis:
             )
 
             # Step 3: Semantic Match & Summarise Evidence
+            if progress_callback:
+                await progress_callback(
+                    f"⚖️ Weighing {len(matches)} source(s) against the claim…",
+                    "generating_verdict",
+                )
             analysis = await match_and_summarise(
                 raw_text=text,
                 claim_info=claim_info,
