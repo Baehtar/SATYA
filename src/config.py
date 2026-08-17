@@ -15,14 +15,18 @@ class Settings(BaseSettings):
     )
 
     # ── Telegram ──────────────────────────────────────────────────────────────
-    telegram_bot_token: str = Field(..., description="Telegram bot token from @BotFather")
+    telegram_bot_token: str = Field(default="", description="Telegram bot token from @BotFather")
 
     # ── LLM ───────────────────────────────────────────────────────────────────
-    gemini_api_key: str = Field(..., description="Google Gemini API key")
-    gemini_model: str = "gemini-2.0-flash"
+    gemini_api_key: str = Field(default="", description="Google Gemini API key")
+    gemini_model: str = "gemini-3.5-flash-lite"
+
+    # ── Hugging Face ──────────────────────────────────────────────────────────
+    hf_api_key: str = Field(default="", description="Hugging Face API key")
+    hf_image_model: str = Field(default="Organika/sdxl-detector", description="Hugging Face model")
 
     # ── Search ────────────────────────────────────────────────────────────────
-    serpapi_key: str = Field(..., description="SerpAPI key for Google Lens")
+    serpapi_key: str = Field(default="", description="SerpAPI key for Google Lens / web search")
     google_factcheck_api_key: str = Field(default="", description="Google Fact Check API key (free)")
 
     # ── App ───────────────────────────────────────────────────────────────────
@@ -31,7 +35,7 @@ class Settings(BaseSettings):
 
     # ── Timeouts (seconds) ────────────────────────────────────────────────────
     image_pipeline_timeout: int = 30
-    text_pipeline_timeout: int = 25
+    text_pipeline_timeout: int = 45
     audio_pipeline_timeout: int = 35
     total_timeout: int = 58
 
@@ -41,7 +45,7 @@ class Settings(BaseSettings):
 
     # ── Models ────────────────────────────────────────────────────────────────
     whisper_model_size: str = "medium"
-    ai_image_detector_model: str = "umm-maybe/AI-image-detector"
+    ai_image_detector_model: str = "Organika/sdxl-detector"
     use_gpu: bool = True
 
     # ── Database ──────────────────────────────────────────────────────────────

@@ -1,19 +1,34 @@
 """
-src/verdict/card_generator.py — Verdict card generation + Hindi translation.
-Owned by: Person 3
-
-Uses Gemini to write a grandparent-readable explanation in English + Hindi.
+src/verdict/card_generator.py — Verdict card generation using async google.genai.
+Uses Gemini to write non-technical, clear explanations in English, Hindi, and Tamil.
 """
 import json
 import structlog
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from src.config import settings
 from src.models.schemas import VerdictCard, Verdict, FactCheckMatch
 from src.verdict.confidence import CalibratedScore
 from src.verdict.aggregator import AggregatedEvidence
 
 log = structlog.get_logger(__name__)
-_model = genai.GenerativeModel(settings.gemini_model)
+
+
+def _get_client():
+    if not settings.gemini_api_key:
+        return None
+    return genai.Client(api_key=settings.gemini_api_key)
+
+
+def _clean_json_response(raw: str) -> dict:
+    raw = raw.strip()
+    start_idx = raw.find('{')
+    end_idx = raw.rfind('}')
+    if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+        raw_json = raw[start_idx:end_idx + 1]
+        return json.loads(raw_json)
+    return json.loads(raw)
+
 
 CARD_GEN_PROMPT = """You are writing a fact-check result card for an Indian family WhatsApp group.
 The audience is non-technical — think of explaining this to a grandparent.
@@ -28,14 +43,14 @@ FACT-CHECK SOURCES:
 
 Write a fact-check card in this EXACT JSON format:
 {{
-  "explanation_english": "2-3 simple sentences. No jargon. Start with what we found, then why it matters. Example: 'This photo is from the 2018 Kerala floods, not yesterday's cyclone. The original was published by NDTV on August 17, 2018. The image is real but being shared with false context.'",
+  "explanation_english": "2-3 simple sentences. No jargon. Start with what we found, then why it matters.",
   "explanation_hindi": "वही 2-3 वाक्य हिंदी में। सरल भाषा में। जैसे परिवार में बात करते हैं। Hinglish ठीक है।"
 }}
 
 Rules:
-- English: 8th grade reading level. No "ELA analysis", "metadata", "spectral". Use plain words.
+- English: Simple reading level. No jargon. Use plain words.
 - Hindi: Natural Hinglish is fine. Avoid stiff formal Hindi. Write how people actually talk.
-- For UNVERIFIABLE: be honest — say "we couldn't find any fact-check for this" not "it's false"
+- For UNVERIFIABLE: say "we couldn't find any fact-check for this" not "it's false"
 - For AI_GENERATED: say "this image was made by AI software, not a real photo/event"
 - For MISLEADING_CONTEXT: say "the image is real but it's from [date/event], not [claimed event]"
 - Maximum 60 words per language
@@ -48,9 +63,8 @@ async def generate_card(
     request_id: str,
 ) -> VerdictCard:
     """
-    Generates the final VerdictCard using Gemini for the explanations.
+    Generates the final VerdictCard asynchronously using google.genai for explanations.
     """
-    # Prepare source list
     sources = evidence.best_sources or []
     source_urls = [s.source_url for s in sources if s.source_url]
 
@@ -76,17 +90,22 @@ async def generate_card(
     )
 
     try:
-        response = await _model.generate_content_async(
-            prompt,
-            generation_config=genai.GenerationConfig(temperature=0.3, max_output_tokens=400),
+        client = _get_client()
+        if not client:
+            raise ValueError("No GEMINI_API_KEY configured")
+
+        response = await client.aio.models.generate_content(
+            model=settings.gemini_model,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                temperature=0.3,
+                max_output_tokens=400,
+            ),
         )
         raw = response.text.strip()
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
+        card_text = _clean_json_response(raw)
 
-        card_text = json.loads(raw)
         explanation_en = card_text.get("explanation_english", _fallback_english(score.verdict))
         explanation_hi = card_text.get("explanation_hindi", _fallback_hindi(score.verdict))
 
