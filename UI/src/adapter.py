@@ -85,7 +85,7 @@ DISCLAIMER = (
 _TAG_RE = re.compile(r"<[^>]+>")
 
 EXPLAIN_PROMPT = """You are Satya, a fact-checking assistant for Indian WhatsApp forwards.
-Rewrite the analysis below as a verdict explanation for a non-technical reader — think of explaining it to a grandparent.
+Rewrite the analysis below as a plain-language verdict explanation that anyone can understand — use simple, everyday words, no jargon.
 
 VERDICT: {verdict}
 WHAT WAS CHECKED: {claim}
@@ -97,6 +97,7 @@ Rules:
 - Say what we found first, then what it means for the reader.
 - Never claim more certainty than the notes support. For "unverifiable" say we could not find a fact-check — do NOT say it is false.
 - Hindi: natural Hinglish is fine. Write how people actually speak, not stiff formal Hindi.
+- Do NOT address the reader as "dada/dadi", "nana/nani", or any specific person.
 - No markdown, no HTML, no bullet points.
 
 Respond with JSON only:
