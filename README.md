@@ -159,6 +159,48 @@ See `docs/architecture.md` for the full pipeline diagram.
 
 ---
 
+## Image-to-Fake-News OCR Workflow
+
+Satya features a complete **Image → Multilingual OCR → Claim Extraction → Fact Check Retrieval → Multilingual NLI → Evidence Aggregation** pipeline for news graphics, social media posts, WhatsApp forwards, and newspaper clippings.
+
+```
+Telegram Image
+      ↓
+Download Image
+      ↓
+ ┌───────────────────────────────┐
+ │ Existing AI Image Detector    │  ──▶ AI Authenticity Score (Visual)
+ └───────────────┬───────────────┘
+                 │
+                 ▼
+        Multilingual OCR (EN, HI Devanagari, HI Roman/Hinglish, TA Tamil, TA Roman/Tanglish)
+                 │
+                 ▼
+        OCR Noise Cleaning & Script Detection
+                 │
+                 ▼
+        Claim Extraction (Gemini 3.5 Flash-Lite)
+                 │
+                 ▼
+        Parallel Evidence Retrieval (PIB, Alt News, BOOM, Google FactCheck, Google News)
+                 │
+                 ▼
+        Multilingual NLI Reasoning (ENTAILMENT | CONTRADICTION | NEUTRAL)
+                 │
+                 ▼
+        Evidence Aggregator & Calibrated Confidence Engine
+                 │
+                 ▼
+        Telegram Response Card
+```
+
+### Key Design Principle: Evidence Fusion
+- **AI Image Score** = *Visual Authenticity Signal* (detects synthetic SDXL/Midjourney images).
+- **Text Claim Verification** = *News Truth Signal* (verifies factual assertions against PIB, Alt News, BOOM, Google News).
+- The engine fuses both signals without falsely declaring real images with fake captions or AI images with true news as blanket false.
+
+---
+
 ## Key Design Decisions
 
 1. **UNVERIFIABLE is a first-class verdict** — the system never falls back to LIKELY_FALSE when evidence is insufficient. A confident "we don't know" is better than a wrong verdict.
