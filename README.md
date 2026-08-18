@@ -57,12 +57,48 @@ cp .env.example .env
 | `SERPAPI_KEY` | [serpapi.com](https://serpapi.com) (free: 100 searches/month) |
 | `GOOGLE_FACTCHECK_API_KEY` | [Google Cloud Console](https://console.cloud.google.com/) → Fact Check Tools API (free) |
 
-### 5. Run the bot
+**Reverse image search (provenance)** — finds where a photo appeared before:
+| Key | Where to get it | Notes |
+|---|---|---|
+| `GOOGLE_VISION_API_KEY` | [Cloud Console](https://console.cloud.google.com/apis/library/vision.googleapis.com) → enable Vision API → create API key | Primary. Sends the image bytes directly, so nothing is published |
+| `SERPAPI_KEY` + `PUBLIC_IMAGE_BASE_URL` | already above | Optional second provider (Google Lens) |
+
+Google Lens searches an image **by URL**, so it only runs when
+`PUBLIC_IMAGE_BASE_URL` (or `SERPAPI_LENS_ALLOW_UPLOAD=true`) tells Satya the
+image is reachable publicly. Both options send the user's picture to a third
+party, so both are off by default and Vision runs alone. Set
+`REVERSE_SEARCH_ENABLED=false` to disable provenance entirely.
+
+**Voice notes (Whisper STT)** — set one of these for the best multilingual accuracy:
+| Key | Where to get it | Model used |
+|---|---|---|
+| `OPENAI_API_KEY` | [platform.openai.com](https://platform.openai.com/api-keys) | `whisper-1` |
+| `GROQ_API_KEY` | [console.groq.com](https://console.groq.com/keys) (free tier) | `whisper-large-v3` |
+
+With `STT_ENGINE=auto` (the default), Satya uses Whisper when one of those keys is
+present and falls back to Gemini speech-to-text otherwise — and if the preferred
+engine errors out, the other one is tried before the request fails. Set
+`WHISPER_API_BASE` to point at any other OpenAI-compatible endpoint (e.g. a
+self-hosted faster-whisper server), or `WHISPER_BACKEND=local` to run the
+`openai-whisper` package on your own GPU.
+
+### 5. Run the Telegram bot
 ```bash
-python -m src.bot.telegram_bot
+python main.py
 ```
 
-### 6. Run the dashboard (optional)
+### 6. Run the web UI (optional)
+```bash
+python -m UI.run
+# Open http://localhost:8000
+```
+
+The web UI is a second front-end over the **same** analysis code the bot uses
+(`services/ml_service.py`) — image, text and voice checks with live progress and a
+bilingual verdict card. `GET /api/health` reports which API keys are configured,
+which is the quickest way to see why a result came back degraded.
+
+### 7. Run the trend dashboard (optional)
 ```bash
 uvicorn src.dashboard.app:app --port 8080 --reload
 # Open http://localhost:8080
@@ -107,6 +143,29 @@ satya/
 │   └── dashboard/
 │       ├── app.py                   # FastAPI trend dashboard API
 │       └── static/index.html        # Dashboard frontend
+├── bot/                             # The running Telegram bot (entry: main.py)
+│   ├── handlers.py                  # Commands, menu, message handling
+│   ├── router.py                    # Message type detection
+│   └── response.py                  # Verdict → Telegram HTML card
+├── services/                        # Shared backend used by BOTH front-ends
+│   ├── ml_service.py                # check_text / check_image / check_voice / check_mixed
+│   ├── ocr/                         # Multilingual OCR (Gemini Vision + tesseract fallback)
+│   ├── image/                       # Reverse Image Engine — provenance
+│   │   ├── reverse_engine.py        # Entry point: reverse_image_check()
+│   │   ├── google_vision.py         # Web Detection (primary, takes local files)
+│   │   ├── serpapi_lens.py          # Google Lens (secondary, needs a public URL)
+│   │   ├── match_ranker.py          # Dedupe across providers + rank by strength
+│   │   ├── date_extractor.py        # JSON-LD → meta → <time> → text → URL
+│   │   ├── image_forensics.py       # ELA, noise, copy-move, resampling, JPEG
+│   │   └── metadata.py              # SHA-256, pHash, EXIF of the untouched file
+│   └── audio/                       # Voice-note speech-to-text
+│       ├── transcribe.py            # Engine dispatch: Whisper ⇄ Gemini fallback
+│       ├── whisper_stt.py           # Whisper (OpenAI-compatible API, or local)
+│       └── convert.py               # ffmpeg transcode for unsupported containers
+├── UI/                              # Web front-end (entry: python -m UI.run)
+│   ├── src/server.py                # FastAPI + SSE progress streaming
+│   ├── src/adapter.py               # Backend result → verdict-card JSON
+│   └── frontend/                    # Single-page app (no build step)
 ├── tests/
 │   └── test_judging_set.py          # 8-item judging evaluation runner
 ├── docs/
@@ -129,6 +188,11 @@ pytest tests/ -v
 
 # Single pipeline test
 pytest tests/test_judging_set.py -k "TC-01" -v
+
+# Reverse Image Engine — no network, no API keys needed
+pytest tests/test_reverse_image_engine.py -v      # 37 tests: the 17 scenarios,
+                                                  # date priority, ranking, forensics
+pytest tests/test_provenance_integration.py -v    # 15 tests: bot/web wiring
 ```
 
 ---
@@ -196,8 +260,69 @@ Download Image
 
 ### Key Design Principle: Evidence Fusion
 - **AI Image Score** = *Visual Authenticity Signal* (detects synthetic SDXL/Midjourney images).
+- **Image Provenance** = *Context Signal* (where the photo appeared before — see below).
 - **Text Claim Verification** = *News Truth Signal* (verifies factual assertions against PIB, Alt News, BOOM, Google News).
-- The engine fuses both signals without falsely declaring real images with fake captions or AI images with true news as blanket false.
+- The engine fuses all three without falsely declaring real images with fake captions or AI images with true news as blanket false.
+
+---
+
+## Reverse Image Engine (provenance)
+
+The commonest fake in circulation is not a synthetic image — it is a **real
+photograph with a false date attached**. It scores 0% on an AI detector and
+shows no manipulation, because nothing about the picture was altered. Only its
+history gives it away.
+
+```
+IMAGE → SHA-256 + pHash + EXIF (original preserved, never modified)
+          │
+          ├── Local forensics ── ELA · noise · copy-move · resampling · JPEG tables
+          │
+          └── Reverse search ─── Google Vision Web Detection ‖ SerpAPI Google Lens
+                    │
+                    ▼
+              dedupe by canonical URL, rank by match strength
+                    │
+                    ▼
+              fetch top pages → extract publication dates
+                 JSON-LD 0.95 → meta 0.90 → <time> 0.75 → text 0.55 → URL 0.45
+                    │
+                    ▼
+              earliest LOCATED appearance   vs   date the claim asserts
+                    │
+                    ▼
+              RECYCLED / CONTEMPORANEOUS / PREVIOUSLY_PUBLISHED /
+              SIMILAR_ONLY / NO_MATCHES_LOCATED / SEARCH_UNAVAILABLE
+```
+
+Three rules the engine enforces, because getting them wrong is how a
+fact-checker becomes a rumour mill:
+
+1. **"No match found" is never reported as "original."** It means our providers
+   did not locate a copy. `searched: false` records the difference between "we
+   looked and found nothing" and "we could not look at all".
+2. **"Earliest located appearance", never "original date."** We only ever see
+   the oldest copy that happens to be indexed.
+3. **Only exact/full/partial matches can drive a recycled verdict.** A
+   *visually similar* flood photo from 2018 is not *this* flood photo from 2018,
+   and is weighted at 0.15 against an exact match's 1.00.
+
+A recycled image only changes the message-level verdict when the message
+actually **asserted a date** for the photo ("yesterday's flood"). An old photo
+with no date claimed for it proves nothing — file photos are legitimate. Even
+then, what is false is the framing, not necessarily the photograph.
+
+```python
+from services.image import reverse_image_check
+
+result = await reverse_image_check(
+    "temp/photo.jpg",
+    claim_text="This photo shows yesterday's flood in Bihar",
+)
+result["image_status"]           # "RECYCLED"
+result["earliest_located_date"]  # "2017-08-16"
+result["date_analysis"]["date_difference_days"]   # 3289
+```
 
 ---
 

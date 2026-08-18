@@ -48,6 +48,39 @@ Honest limitations of the system. Required deliverable for judging.
 - "Onion price is ₹200/kg today" — these change daily; fact-check databases don't cover them
 - Verdict: `UNVERIFIABLE`
 
+### 11. Reverse Image Search Coverage
+- "No matching images found" means **our providers did not locate a copy** — never that the
+  image is original. Google's index does not cover most WhatsApp groups, Telegram channels,
+  regional news sites or anything behind a login
+- The engine reports `NO_MATCHES_LOCATED` and `searched: true/false` separately so an
+  unconfigured API key can never masquerade as a clean result
+
+### 12. Publication Dates Are Not Upload Dates
+- We read the date a *page* claims to have been published, which can be back-dated, missing,
+  auto-updated by a CMS, or simply wrong
+- `dateModified` is deliberately ignored — a 2019 article edited last week would otherwise
+  look brand new. Conflicting dates on one page are flagged, not silently resolved
+- A photo agency page dated 2015 may itself be reusing an older photograph
+
+### 13. Google Lens Needs a Public Image URL
+- SerpAPI's Lens engine searches *by URL*, so it only runs when `PUBLIC_IMAGE_BASE_URL` or
+  `SERPAPI_LENS_ALLOW_UPLOAD` is set — both publish the user's picture to a third party
+- Default deployment runs Google Vision alone, which accepts the bytes directly. Fewer
+  matches, no privacy cost
+
+### 14. Forensics Are Signals, Not Proof
+- ELA fires on any re-compression; every WhatsApp forward is re-compressed
+- Copy-move fires on genuinely repeating content (crowds, tiles, UI chrome in screenshots)
+- Resampling fires on any resize — universal for anything through a social platform
+- "Photoshop" in EXIF means the file was *saved* by an editor; cropping counts
+- On images above ~1536px only a native-resolution centre window is examined, so a forgery
+  at the very edge of a large frame can be missed
+
+### 15. Cropped and Recomposed Images
+- A heavy crop, a mirror flip, or an image placed inside a collage may not match the original
+  in either provider's index, and pHash tolerance is limited
+- Partial matches are weighted below full matches for exactly this reason
+
 ---
 
 ## What gives us honest confidence
@@ -55,7 +88,15 @@ Honest limitations of the system. Required deliverable for judging.
 | Signal | What it proves |
 |---|---|
 | AI generation score > 0.85 | Strong evidence this image was never real |
-| Recycled image + date gap > 1 year | Strong evidence of misleading context |
+| Exact match on a dated news page + gap > 1 year + a date asserted in the claim | Strong evidence of misleading context — about the framing, not the photo |
+| The same page found independently by Vision *and* Lens | Corroborated provenance, recorded but not double-counted |
 | 2+ independent fact-checkers agree | High-confidence FALSE verdict |
 | No signals found | Honest UNVERIFIABLE — not a lazy FALSE |
 | Conflicting signals | Reduced confidence, flag for adversarial review |
+
+| Signal | What it does NOT prove |
+|---|---|
+| No reverse-search match | That the image is original — only that no copy was located |
+| An old match with no date in the claim | Misuse. File photos are legitimate |
+| Visual similarity to an old photo | Anything about *this* photo |
+| High ELA / resampling / stripped EXIF | Manipulation. All three are normal for any forward |

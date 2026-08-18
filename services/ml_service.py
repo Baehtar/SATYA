@@ -11,11 +11,13 @@ HF_API_KEY = os.getenv("HF_API_KEY", "")
 HF_IMAGE_MODEL = os.getenv("HF_IMAGE_MODEL", "Organika/sdxl-detector")
 
 
-async def check_text(text: str):
+async def check_text(text: str, progress_callback=None):
     """
     Multilingual Fake News & Claim Verification Pipeline.
     Supports EN, HI (Devanagari/Roman), TA (Tamil/Roman), and Mixed languages.
     Searches PIB, Alt News, BOOM, and Google FactCheck API in parallel.
+
+    progress_callback(message: str, step: str) — optional async hook for streaming UIs.
     """
     print(f"TEXT CLAIM SENT TO VERIFICATION PIPELINE:\n{text[:150]}...")
 
@@ -29,7 +31,7 @@ async def check_text(text: str):
     )
 
     try:
-        analysis = await run_text_pipeline(req)
+        analysis = await run_text_pipeline(req, progress_callback=progress_callback)
 
         # Build clean sources list
         sources = [
@@ -144,117 +146,206 @@ async def check_image_ai(image_path: str):
     }
 
 
-async def check_image(image_path: str, progress_callback=None, mode: str = None):
+async def run_provenance(image_path: str, claim_text: str = "", ai_score: float = None, progress_callback=None):
     """
-    FULL TARGET FLOW with Automatic Reverse Image Search for ALL Images:
-    - Runs AI detection (SDXL / Midjourney / DALL-E).
-    - Runs Reverse Image Search & Visual Provenance (Earliest online appearance date / Recycled image detection).
-    - Runs OCR text extraction & News Claim Verification (PIB / Alt News / BOOM / Google News).
+    Reverse Image Engine — where has this picture been before?
+
+    Wrapped in a hard timeout: it calls two search providers and then fetches
+    the matching pages, so a single slow publisher must never hold up a
+    Telegram reply. A timeout degrades to "unavailable", which the renderer
+    reports honestly rather than as "no earlier copies found".
+    """
+    from src.config import settings
+    from services.image import reverse_image_check
+
+    if not settings.reverse_search_enabled:
+        return None
+
+    if progress_callback:
+        await progress_callback("🌐 Checking where this image has appeared before…", "image_analysis")
+
+    try:
+        return await asyncio.wait_for(
+            reverse_image_check(
+                image_path,
+                claim_text=claim_text,
+                ai_generated_score=ai_score,
+            ),
+            timeout=settings.image_pipeline_timeout,
+        )
+    except asyncio.TimeoutError:
+        print("Provenance check timed out")
+        return {
+            "image_status": "SEARCH_UNAVAILABLE",
+            "searched": False,
+            "ai_generated_score": ai_score,
+            "notes": ["The provenance check timed out before it finished."],
+            "reverse_matches": [],
+            "forensics": {},
+            "date_analysis": {},
+        }
+    except Exception as e:
+        print(f"Provenance check failed: {e}")
+        return None
+
+
+def _with_provenance(explanation: str, provenance: dict) -> str:
+    """
+    Appends the IMAGE ANALYSIS block to a claim explanation.
+
+    The two stay visually separate on purpose: provenance describes the
+    photograph, the claim verdict describes the sentence. An old photo does not
+    make a statement false, and a true statement does not make the photo recent.
+    """
+    if not provenance:
+        return explanation
+
+    from services.image import render_image_analysis
+
+    forensics_signals = (provenance.get("forensics") or {}).get("signals") or []
+    if not provenance.get("searched") and not forensics_signals:
+        return explanation
+
+    block = render_image_analysis(provenance)
+    return f"{explanation}\n\n━━━━━━━━━━\n{block}" if block else explanation
+
+
+def apply_provenance_fusion(verdict: str, confidence: float, provenance: dict):
+    """
+    Lets a recycled image change the MESSAGE-level verdict — but only when the
+    message actually made a dated assertion for the photograph to contradict.
+
+    The distinction is the whole point of the engine. If someone sends an old
+    photo with no date attached, the photo being old proves nothing; it may be a
+    file photo, perfectly legitimately. It is the combination of "this shows
+    yesterday's cyclone" with "this photo was published in 2018" that is false —
+    and even then, what's false is the framing, not necessarily the photograph.
+
+    Returns (verdict, confidence, note). A claim already debunked on its own
+    evidence is left alone; nothing here ever flips a verdict to LIKELY_TRUE.
+    """
+    if not provenance or provenance.get("image_status") != "RECYCLED":
+        return verdict, confidence, ""
+
+    prov_confidence = float(provenance.get("status_confidence") or 0.0)
+    date_analysis = provenance.get("date_analysis") or {}
+    # "caller"/"explicit_date"/"relative_term" mean a date was actually asserted.
+    # Falling back to "now" (comparison_basis=message_received) does not count.
+    asserted_date = (
+        date_analysis.get("claim_date_method") in ("caller", "explicit_date", "relative_term")
+        and date_analysis.get("comparison_basis") == "claim_date"
+    )
+
+    if not asserted_date or prov_confidence < 0.55:
+        return verdict, confidence, ""
+
+    note = (
+        "🔁 <b>The image does not show the event described.</b> It was already "
+        "online well before the date claimed for it. The photograph itself may be "
+        "genuine — it is the context around it that is wrong."
+    )
+
+    if verdict == "LIKELY_FALSE":
+        return verdict, max(confidence, prov_confidence), note
+    if verdict == "LIKELY_TRUE":
+        # The words check out but the picture is borrowed — say exactly that.
+        return verdict, confidence, note
+    return "LIKELY_FALSE", prov_confidence, note
+
+
+async def check_image(image_path: str, progress_callback=None, mode: str = None, caption: str = ""):
+    """
+    FULL TARGET FLOW with Mode Selection Support:
+    - mode="ai_image": Dedicated AI visual detector report (SDXL / Midjourney / DALL-E).
+    - mode="fake_news" / "extract_image": Dedicated OCR text extraction & news claim verification.
+    - mode=None: Full combined pipeline (AI Image Detector + OCR Claim Verification).
+
+    Every mode also runs the Reverse Image Engine (services/image) for
+    provenance: AI-generation score, local forensics and reverse search answer
+    three different questions and are reported separately.
+
+    `caption` is the message text sent alongside the image — the usual home of
+    the date being claimed ("yesterday's flood in Bihar"), which is what the
+    earliest located appearance gets compared against.
+
+    progress_callback(message: str, step: str) — optional async hook for streaming UIs.
     """
     print(f"IMAGE PROCESSOR ACTIVATED (Mode={mode}): {image_path}")
 
+    # Mode 3: Dedicated AI Image Detection
+    if mode == "ai_image":
+        if progress_callback:
+            await progress_callback("🤖 Running AI image authenticity detection (SDXL / Midjourney / DALL-E)…", "image_analysis")
+        ai_res = await check_image_ai(image_path)
+        image_ai_score = float(ai_res.get("artificial_score", 0.0))
+
+        # Provenance still matters here: a real photograph reused out of context
+        # is the commonest fake, and it scores 0% on an AI detector.
+        provenance = await run_provenance(
+            image_path, claim_text=caption, ai_score=image_ai_score,
+            progress_callback=progress_callback,
+        )
+
+        if progress_callback:
+            await progress_callback("✅ AI visual inspection complete.", "image_analysis")
+
+        return {
+            "type": "image",
+            "verdict": ai_res.get("verdict", "UNVERIFIABLE"),
+            "confidence": ai_res.get("confidence", 0.0),
+            "image_ai_score": image_ai_score,
+            "explanation": _with_provenance(
+                f"🤖 <b>AI Image Detection Result:</b>\n\n{ai_res.get('explanation', '')}",
+                provenance,
+            ),
+            "provenance": provenance,
+            "sources": []
+        }
+
+    # Mode 1 & 2 / Combined Flow
     if progress_callback:
-        await progress_callback("🔍 Analyzing image: AI detection, reverse search & forensics...")
+        await progress_callback("🔍 Reading the image & extracting any text…", "image_analysis")
 
     ai_task = check_image_ai(image_path)
-    from services.image.reverse_engine import reverse_image_check
-    rev_task = reverse_image_check(image_path)
 
     from services.ocr import extract_text_from_image, normalize_ocr_result
     ocr_raw = await extract_text_from_image(image_path)
     ocr_meta = normalize_ocr_result(ocr_raw.get("raw_text", ""))
 
-    ai_res, rev_res = await asyncio.gather(ai_task, rev_task)
+    ai_res = await ai_task
     image_ai_score = float(ai_res.get("artificial_score", 0.0))
 
-    earliest_date = rev_res.get("earliest_located_date")
-    image_status = rev_res.get("image_status")
-    forensics = rev_res.get("forensics", {})
-    gemini_info = rev_res.get("gemini_visual_info", {})
-    event_title = gemini_info.get("event_title") or ""
-    location_str = gemini_info.get("location") or ""
-
-    recycled_note = ""
-    if image_status == "RECYCLED" or gemini_info.get("is_recycled"):
-        recycled_note = (
-            f"\n\n♻️ <b>RECYCLED IMAGE DETECTED:</b>\n"
-            f"📌 Event: <b>{event_title or 'News Archive Photo'}</b>\n"
-            f"🗓️ Earliest Online Appearance: <b>{earliest_date or 'Earlier Online Archive'}</b>.\n"
-            f"⚠️ <i>This photograph was published online in the past and is being shared out of context.</i>"
-        )
-    elif earliest_date or event_title:
-        recycled_note = (
-            f"\n\n🔍 <b>IMAGE PROVENANCE LOCATED:</b>\n"
-            f"📌 Identified Event: <b>{event_title or 'Indexed News Photo'}</b>\n"
-            f"🗓️ Earliest Located Appearance: <b>{earliest_date or 'Recent'}</b>"
-        )
-
-    # Mode 2: Dedicated AI Image Detection Mode
-    if mode == "ai_image":
-        if progress_callback:
-            await progress_callback("✅ Image AI inspection & reverse provenance search complete.")
-
-        verdict = ai_res.get("verdict", "LIKELY_TRUE")
-        conf = ai_res.get("confidence", 0.85)
-
-        explanation = f"🤖 <b>AI Image Detection Result:</b>\n\n{ai_res.get('explanation', '')}{recycled_note}"
-        sources = [
-            {"name": m.get("page_title") or m.get("source_provider", "Web Match"), "url": m.get("url")}
-            for m in rev_res.get("reverse_matches", [])[:5] if m.get("url")
-        ]
-
-        return {
-            "type": "image",
-            "verdict": verdict,
-            "confidence": conf,
-            "image_ai_score": image_ai_score,
-            "explanation": explanation,
-            "sources": sources,
-            "reverse_engine": rev_res
-        }
+    # The date being claimed lives in the caption if there is one, otherwise in
+    # the text printed on the image itself.
+    claim_text = caption or ocr_meta.get("cleaned_text", "")
+    provenance_task = asyncio.create_task(
+        run_provenance(image_path, claim_text=claim_text, ai_score=image_ai_score,
+                       progress_callback=progress_callback)
+    )
 
     # Step 2: Check if OCR found readable text in image
     if not ocr_meta.get("has_readable_text"):
+        provenance = await provenance_task
         if progress_callback:
-            await progress_callback("✅ Image inspection complete.")
-
-        # If image is a real photo (not AI-generated), mark as LIKELY_TRUE for photo authenticity
-        is_ai = ai_res.get("verdict") == "LIKELY_FALSE"
-        verdict = "LIKELY_FALSE" if is_ai else "LIKELY_TRUE"
-        conf = max(ai_res.get("confidence", 0.85), rev_res.get("date_analysis", {}).get("recycled_confidence", 0.85))
-
-        sources = [
-            {"name": m.get("page_title") or m.get("source_provider", "Web Match"), "url": m.get("url")}
-            for m in rev_res.get("reverse_matches", [])[:5] if m.get("url")
-        ]
-
-        if is_ai:
-            auth_text = "🤖 <b>AI Generated Image Detected</b>"
-        else:
-            auth_text = "🟢 <b>Authentic Photo (Real Camera/News Image)</b>"
-
-        explanation = (
-            f"<b>Photo Authenticity & Provenance:</b>\n\n"
-            f"{auth_text}\n"
-            f"{ai_res.get('explanation', '')}"
-            f"{recycled_note}\n\n"
-            f"<i>Note: No headline or text claim was provided with this photo. If someone claims this photo represents a current event, note that it is from {earliest_date or 'earlier archives'}.</i>"
-        )
-
+            await progress_callback("✅ No readable text in the image — visual report ready.", "image_analysis")
         return {
             "type": "image",
-            "verdict": verdict,
-            "confidence": conf,
+            "verdict": ai_res.get("verdict", "UNVERIFIABLE"),
+            "confidence": ai_res.get("confidence", 0.0),
             "image_ai_score": image_ai_score,
-            "explanation": explanation,
-            "sources": sources,
-            "ocr": ocr_meta,
-            "reverse_engine": rev_res
+            "explanation": _with_provenance(
+                f"<b>Image Authenticity:</b> {ai_res.get('explanation', '')}\n\n"
+                f"<i>Note: No legible news headline/text was found in this image for fact-check search.</i>",
+                provenance,
+            ),
+            "provenance": provenance,
+            "sources": [],
+            "ocr": ocr_meta
         }
 
     # Step 3: Run Text Claim Extraction & Verification Pipeline
     if progress_callback:
-        await progress_callback(f"📝 Extracted news text ({ocr_meta.get('language')}). Checking claim against PIB/AltNews/BOOM/Google...")
+        await progress_callback(f"📝 Text extracted ({ocr_meta.get('language')}) — verifying the claim…", "image_analysis")
 
     from src.models.schemas import CheckRequest
     from src.pipelines.text.pipeline import run_text_pipeline
@@ -266,10 +357,12 @@ async def check_image(image_path: str, progress_callback=None, mode: str = None)
         text_content=ocr_meta.get("cleaned_text", "")
     )
 
-    if progress_callback:
-        await progress_callback("⚖️ Comparing evidence & calibrating verdict...")
-
-    text_analysis = await run_text_pipeline(req)
+    # Claim verification and provenance are independent questions — run them
+    # concurrently rather than making the user wait for one then the other.
+    text_analysis, provenance = await asyncio.gather(
+        run_text_pipeline(req, progress_callback=progress_callback),
+        provenance_task,
+    )
 
     # Step 4: Aggregate Evidence & Fuse Image AI + Claim NLI Signals
     fused_res = aggregate_evidence(text_analysis, image_ai_score, ocr_meta)
@@ -280,38 +373,37 @@ async def check_image(image_path: str, progress_callback=None, mode: str = None)
     conf_level = fused_res.get("confidence_level", "MODERATE")
     sources = fused_res.get("sources", [])
 
-    if image_status == "RECYCLED" or gemini_info.get("is_recycled"):
-        verdict_val = "LIKELY_FALSE"
-        conf_score = max(conf_score, 0.85)
-
     # Step 5: Format Telegram Verdict Card Text
     if verdict_val == "LIKELY_FALSE":
         explanation = (
             f"<b>Claim Analysis: Likely False</b>\n\n"
             f"Extracted Claim: <i>\"{extracted_claim}\"</i>\n\n"
-            f"Evidence: Fact-checks or image reverse search contradict this claim.{recycled_note}"
+            f"Evidence: Fact-checks debunk this claim.\n\n"
+            f"🖼️ <b>Image Note:</b> {fused_res.get('image_note', '')}"
         )
     elif verdict_val == "LIKELY_TRUE":
         explanation = (
             f"<b>Claim Analysis: Likely True</b>\n\n"
             f"Extracted Claim: <i>\"{extracted_claim}\"</i>\n\n"
-            f"Evidence: Verified by news & fact-check sources.{recycled_note}"
+            f"Evidence: Verified by news & fact-check sources.\n\n"
+            f"🖼️ <b>Image Note:</b> {fused_res.get('image_note', '')}"
         )
     else:
         explanation = (
             f"<b>Claim Analysis: Unverifiable</b>\n\n"
             f"Extracted Claim: <i>\"{extracted_claim}\"</i>\n\n"
-            f"No active fake-news debunks or verifications were found in PIB, Alt News, or BOOM archives for this claim.{recycled_note}"
+            f"No active fake-news debunks or verifications were found in PIB, Alt News, or BOOM archives for this claim.\n\n"
+            f"🖼️ <b>Image Note:</b> {fused_res.get('image_note', '')}"
         )
 
-    rev_sources = [
-        {"name": m.get("page_title") or m.get("source_provider", "Web Match"), "url": m.get("url")}
-        for m in rev_res.get("reverse_matches", [])[:3] if m.get("url")
-    ]
-    all_sources = (sources or []) + [s for s in rev_sources if s not in sources]
+    verdict_val, conf_score, provenance_note = apply_provenance_fusion(
+        verdict_val, conf_score, provenance
+    )
+    if provenance_note:
+        explanation = f"{explanation}\n\n{provenance_note}"
 
     if progress_callback:
-        await progress_callback("✅ Analysis complete.")
+        await progress_callback("✅ Analysis complete.", "generating_verdict")
 
     return {
         "type": "image",
@@ -319,125 +411,70 @@ async def check_image(image_path: str, progress_callback=None, mode: str = None)
         "confidence": conf_score,
         "confidence_level": conf_level,
         "extracted_claim": extracted_claim,
-        "explanation": explanation,
+        "explanation": _with_provenance(explanation, provenance),
         "image_ai_score": image_ai_score,
-        "sources": all_sources,
-        "ocr": ocr_meta,
-        "reverse_engine": rev_res
+        "provenance": provenance,
+        "sources": sources,
+        "ocr": ocr_meta
     }
 
 
 async def check_voice(audio_path: str, progress_callback=None):
     """
-    Complete AUDIO → TEXT → FAKE-NEWS VERIFICATION Pipeline:
-    1. Transcribes audio via Hugging Face Whisper Large-v3-Turbo.
-    2. Extracts structured claim and language preservation.
-    3. Passes transcript to existing multilingual text claim verification pipeline.
+    Speech-to-text (Gemini) → the same multilingual claim verification pipeline
+    used for text forwards. Returns the text verdict plus the transcript.
     """
-    print(f"AUDIO SENT TO WHISPER & FACT-CHECK PIPELINE: {audio_path}")
+    print(f"VOICE SENT TO ML: {audio_path}")
 
-    from services.audio.whisper_service import transcribe
-    from src.models.schemas import CheckRequest
-    from src.pipelines.text.pipeline import run_text_pipeline
+    from services.audio import transcribe_audio
 
-    try:
-        if progress_callback:
-            await progress_callback("🎙️ Transcribing audio...")
+    if progress_callback:
+        await progress_callback("🎤 Transcribing the voice note…", "audio_analysis")
 
-        transcription = await transcribe(audio_path)
-        transcript_text = transcription.get("text", "").strip()
+    stt = await transcribe_audio(audio_path)
 
-        if not transcript_text:
-            return {
-                "type": "voice",
-                "verdict": "UNVERIFIABLE",
-                "confidence": 0.0,
-                "explanation": "❌ I couldn't transcribe this audio. Please try a clearer recording.",
-                "transcript": "",
-                "extracted_claim": "",
-                "sources": []
-            }
-
-        if progress_callback:
-            await progress_callback("🔎 Checking the claim...")
-
-        req = CheckRequest(
-            request_id=str(uuid.uuid4()),
-            message_type="text",
-            text_content=transcript_text
-        )
-
-        analysis = await run_text_pipeline(req)
-
-        if progress_callback:
-            await progress_callback("⚖️ Comparing evidence...")
-
-        sources = [
-            {
-                "name": m.source_name,
-                "url": m.source_url,
-                "title": m.original_claim,
-                "verdict": m.fact_check_verdict
-            }
-            for m in analysis.matches[:5] if m.source_url
-        ]
-
-        verdict_val = analysis.text_verdict.value if hasattr(analysis.text_verdict, "value") else str(analysis.text_verdict)
-        confidence_score = float(analysis.text_verdict_confidence)
-
-        if verdict_val == "LIKELY_FALSE":
-            explanation = (
-                f"Fact-checks from {', '.join([s['name'] for s in sources[:2]]) or 'authoritative sources'} "
-                f"contradict the claim extracted from this audio recording."
-            )
-        elif verdict_val == "LIKELY_TRUE":
-            explanation = "Fact-check sources confirm the validity of the claim extracted from this audio."
-        else:
-            explanation = (
-                "No active fake-news debunks or verifications were found in PIB, Alt News, or BOOM archives for the claim extracted from this audio.\n\n"
-                "ℹ️ <i>Fact-check databases focus on debunking viral rumors rather than covering standard news events.</i>"
-            )
-
-        if progress_callback:
-            await progress_callback("✅ Analysis complete")
-
-        return {
-            "type": "voice",
-            "verdict": verdict_val,
-            "confidence": confidence_score,
-            "explanation": explanation,
-            "transcript": transcript_text,
-            "extracted_claim": analysis.extracted_claim,
-            "sources": sources,
-            "language": analysis.language.value if hasattr(analysis.language, "value") else str(analysis.language),
-            "transcription_metadata": {
-                "duration_seconds": transcription.get("duration_seconds", 0.0),
-                "processing_time_seconds": transcription.get("processing_time_seconds", 0.0),
-                "device": transcription.get("device", "cpu")
-            }
-        }
-
-    except Exception as e:
-        print(f"Error in check_voice pipeline: {e}")
+    if not stt.get("success") or not stt.get("text"):
         return {
             "type": "voice",
             "verdict": "UNVERIFIABLE",
             "confidence": 0.0,
-            "explanation": "❌ I couldn't transcribe this audio. Please try a clearer recording.",
             "transcript": "",
-            "extracted_claim": "",
+            "explanation": (
+                "<b>Could not transcribe this voice note.</b>\n\n"
+                f"{stt.get('error') or 'No intelligible speech was found.'}\n\n"
+                "Try a clearer recording, or paste the claim as text instead."
+            ),
             "sources": []
         }
 
+    transcript = stt["text"]
 
-async def check_mixed(image_path: str, caption: str):
+    if progress_callback:
+        await progress_callback(
+            f"🗣️ Heard: “{transcript[:60]}…” — verifying the claim…", "audio_analysis"
+        )
+
+    result = await check_text(transcript, progress_callback=progress_callback)
+
+    result["type"] = "voice"
+    result["transcript"] = transcript
+    result["explanation"] = (
+        f"🎤 <b>Transcript</b>\n<i>\"{transcript[:400]}\"</i>\n\n"
+        f"{result.get('explanation', '')}"
+    )
+    return result
+
+
+async def check_mixed(image_path: str, caption: str, progress_callback=None):
     """
     Runs Image AI Detector AND Text Claim Pipeline in parallel.
     Performs Evidence Fusion (Section 2 & 16 of fake_news_workflow.md):
     - Image AI score is an image authenticity signal, NOT proof that text claim is false!
     """
-    image_task = check_image(image_path)
-    text_task = check_text(caption) if caption else None
+    # The caption goes to the image check too: it is where the claimed date
+    # usually lives, and the provenance engine needs it to compare against.
+    image_task = check_image(image_path, progress_callback=progress_callback, caption=caption)
+    text_task = check_text(caption, progress_callback=progress_callback) if caption else None
 
     if text_task:
         image_result, text_result = await asyncio.gather(image_task, text_task)
@@ -495,6 +532,16 @@ async def check_mixed(image_path: str, caption: str):
             f"We could not find enough independent fact-checks for this claim in PIB, Alt News, or BOOM archives."
         )
 
+    # Fusion Rule 5: provenance. A photograph that was already online before the
+    # date the caption claims for it is evidence about the message even when the
+    # fact-check archives have nothing on the claim itself.
+    provenance = image_result.get("provenance")
+    fused_verdict, fused_confidence, provenance_note = apply_provenance_fusion(
+        fused_verdict, fused_confidence, provenance
+    )
+    if provenance_note:
+        fused_explanation = f"{fused_explanation}\n\n{provenance_note}"
+
     return {
         "type": "mixed",
         "verdict": fused_verdict,
@@ -502,5 +549,7 @@ async def check_mixed(image_path: str, caption: str):
         "explanation": fused_explanation,
         "image": image_result,
         "text": text_result,
+        "provenance": provenance,
+        "image_ai_score": image_result.get("image_ai_score", 0.0),
         "sources": sources,
     }

@@ -145,7 +145,7 @@ async def handle_message(
 
         elif message_type == MessageType.IMAGE:
 
-            async def progress_cb(text: str):
+            async def progress_cb(text: str, step: str = ""):
                 try:
                     await checking.edit_text(f"<b>Satya Analysis Engine</b>\n\n{text}", parse_mode="HTML")
                 except Exception:

@@ -1,131 +1,223 @@
 """
-services/image/metadata.py — SHA256 checksums, perceptual hashing (dHash/pHash), and EXIF metadata extraction.
+services/image/metadata.py — Stage 1: preserve the original and fingerprint it.
+
+Nothing here modifies the image on disk. Every other stage works from the
+fingerprints computed once, here, on the untouched original:
+
+  SHA-256 — exact-duplicate identity. Two files with the same hash are the same
+            bytes; re-encoding changes it completely.
+  pHash   — perceptual identity. Survives resizing, re-compression and minor
+            crops, so it still matches when a forward has been through five
+            WhatsApp round-trips. Implemented in pure numpy (a 32×32 DCT-II via
+            matrix multiply) so we don't pull in imagehash → scipy for 20 lines.
+
+EXIF is read here too, because it carries the *camera's* claim about when the
+photo was taken — a date to compare against, not a verdict on its own. A
+stripped EXIF block is completely normal: every social platform removes it.
 """
 import hashlib
 import os
 import structlog
-from typing import Dict, Any
-from PIL import Image, ExifTags
+from typing import Any, Dict, Optional
+
 import numpy as np
+from PIL import Image
 
 log = structlog.get_logger(__name__)
 
+# pHash parameters: DCT over 32×32, keep the top-left 8×8 low-frequency block.
+_PHASH_IMAGE_SIZE = 32
+_PHASH_DCT_SIZE = 8
 
-def calculate_sha256(image_path: str) -> str:
-    """Calculates SHA-256 hash of an image file."""
-    hasher = hashlib.sha256()
-    with open(image_path, "rb") as f:
+# EXIF Software values that indicate an editor touched the file. Presence proves
+# only that the file was *processed* — resizing counts — never that it was faked.
+EDITING_SOFTWARE = [
+    "photoshop", "gimp", "lightroom", "snapseed", "facetune",
+    "meitu", "adobe", "canva", "picsart", "pixlr", "affinity",
+]
+
+
+def sha256_of(path: str) -> str:
+    """Exact-bytes fingerprint, streamed so a large file never lands in memory."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(65536), b""):
-            hasher.update(chunk)
-    return hasher.hexdigest()
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
-def calculate_dhash(image_path: str, hash_size: int = 8) -> str:
+def _dct_matrix(n: int) -> np.ndarray:
+    """Orthonormal DCT-II basis, so `C @ x @ C.T` is a 2-D DCT."""
+    k = np.arange(n).reshape(-1, 1)
+    i = np.arange(n).reshape(1, -1)
+    basis = np.cos(np.pi * (2 * i + 1) * k / (2 * n))
+    basis[0] *= np.sqrt(1.0 / n)
+    basis[1:] *= np.sqrt(2.0 / n)
+    return basis
+
+
+def perceptual_hash(image: Image.Image) -> str:
     """
-    Computes difference hash (dHash) for perceptual image matching.
-    Resizes image to (hash_size + 1, hash_size) grayscale, compares adjacent pixels.
+    64-bit perceptual hash as 16 hex chars.
+    Two images are near-identical when their hashes differ in only a few bits.
     """
+    grey = image.convert("L").resize(
+        (_PHASH_IMAGE_SIZE, _PHASH_IMAGE_SIZE), Image.Resampling.LANCZOS
+    )
+    pixels = np.asarray(grey, dtype=np.float64)
+
+    c = _dct_matrix(_PHASH_IMAGE_SIZE)
+    dct = c @ pixels @ c.T
+
+    block = dct[:_PHASH_DCT_SIZE, :_PHASH_DCT_SIZE]
+    # Drop DC (block[0][0]) from the median: it holds overall brightness and
+    # would otherwise drag the threshold around.
+    median = np.median(block.flatten()[1:])
+    bits = (block > median).flatten()
+
+    value = 0
+    for bit in bits:
+        value = (value << 1) | int(bit)
+    return f"{value:016x}"
+
+
+def hamming_distance(hash_a: str, hash_b: str) -> int:
+    """Bit difference between two pHashes. 0 = identical, >10 = unrelated."""
     try:
-        with Image.open(image_path) as img:
-            img = img.convert("L").resize((hash_size + 1, hash_size), Image.Resampling.LANCZOS)
-            pixels = np.array(img, dtype=np.int32)
-            # Difference between adjacent pixels
-            diff = pixels[:, 1:] > pixels[:, :-1]
-            # Convert boolean array to hex string
-            binary_str = "".join(["1" if val else "0" for val in diff.flatten()])
-            hex_str = f"{int(binary_str, 2):0{hash_size * hash_size // 4}x}"
-            return hex_str
-    except Exception as e:
-        log.warning("dhash_calculation_failed", path=image_path, error=str(e))
-        return ""
+        return bin(int(hash_a, 16) ^ int(hash_b, 16)).count("1")
+    except (ValueError, TypeError):
+        return 64
 
 
-def calculate_phash(image_path: str) -> str:
+def _decode_gps(gps_raw: Any) -> bool:
+    """True when the GPS block actually carries coordinates, not just a tag."""
+    if not gps_raw or not isinstance(gps_raw, dict):
+        return False
+    # 2 = GPSLatitude, 4 = GPSLongitude in the EXIF GPS IFD.
+    return bool(gps_raw.get(2)) and bool(gps_raw.get(4))
+
+
+def extract_exif(image: Image.Image) -> Dict[str, Any]:
     """
-    Computes simple average perceptual hash (aHash) for visual similarity comparison.
-    Resizes image to 8x8 grayscale, compares each pixel to average brightness.
+    Reads the EXIF block. Returns a dict that is always the same shape, with
+    `exif_present: False` when there is nothing to read.
     """
-    try:
-        with Image.open(image_path) as img:
-            img = img.convert("L").resize((8, 8), Image.Resampling.LANCZOS)
-            pixels = np.array(img, dtype=np.float32)
-            avg = pixels.mean()
-            diff = pixels > avg
-            binary_str = "".join(["1" if val else "0" for val in diff.flatten()])
-            return f"{int(binary_str, 2):016x}"
-    except Exception as e:
-        log.warning("phash_calculation_failed", path=image_path, error=str(e))
-        return ""
-
-
-def extract_metadata(image_path: str) -> Dict[str, Any]:
-    """
-    Extracts image properties and EXIF metadata safely.
-    Returns:
-      {
-        "sha256": str,
-        "dhash": str,
-        "phash": str,
-        "format": str,
-        "dimensions": [width, height],
-        "exif_present": bool,
-        "camera_make": str,
-        "camera_model": str,
-        "software": str,
-        "creation_time": str,
-        "modification_time": str,
-        "gps_present": bool,
-        "raw_exif": dict
-      }
-    """
-    if not os.path.exists(image_path):
-        raise FileNotFoundError(f"Image not found: {image_path}")
-
-    sha256_hash = calculate_sha256(image_path)
-    dhash_str = calculate_dhash(image_path)
-    phash_str = calculate_phash(image_path)
-
-    metadata = {
-        "sha256": sha256_hash,
-        "dhash": dhash_str,
-        "phash": phash_str,
-        "format": "",
-        "dimensions": [0, 0],
+    result: Dict[str, Any] = {
         "exif_present": False,
-        "camera_make": "",
-        "camera_model": "",
-        "software": "",
-        "creation_time": "",
-        "modification_time": "",
+        "camera_make": None,
+        "camera_model": None,
+        "camera": None,
+        "software": None,
+        "creation_time": None,
+        "modify_time": None,
         "gps_present": False,
-        "raw_exif": {}
+        "orientation": None,
+        "lens": None,
+        "editing_software_detected": None,
     }
 
     try:
-        with Image.open(image_path) as img:
-            metadata["format"] = img.format or ""
-            metadata["dimensions"] = [img.width, img.height]
+        from PIL.ExifTags import TAGS
 
-            exif_data = img._getexif() if hasattr(img, "_getexif") else None
-            if exif_data:
-                metadata["exif_present"] = True
-                parsed_exif = {}
-                for tag_id, value in exif_data.items():
-                    tag_name = ExifTags.TAGS.get(tag_id, str(tag_id))
-                    # Standardize value types for JSON serialization
-                    if isinstance(value, bytes):
-                        value = value.decode("utf-8", errors="ignore")
-                    parsed_exif[tag_name] = str(value)
+        raw = image.getexif()
+        if not raw:
+            return result
 
-                metadata["raw_exif"] = parsed_exif
-                metadata["camera_make"] = parsed_exif.get("Make", "").strip()
-                metadata["camera_model"] = parsed_exif.get("Model", "").strip()
-                metadata["software"] = parsed_exif.get("Software", "").strip()
-                metadata["creation_time"] = parsed_exif.get("DateTimeOriginal", parsed_exif.get("DateTimeDigitized", "")).strip()
-                metadata["modification_time"] = parsed_exif.get("DateTime", "").strip()
-                metadata["gps_present"] = "GPSInfo" in parsed_exif or any("GPS" in k for k in parsed_exif)
+        exif = {TAGS.get(k, k): v for k, v in raw.items()}
+        # Camera settings live in a sub-IFD (0x8769) that getexif() doesn't inline.
+        try:
+            for k, v in raw.get_ifd(0x8769).items():
+                exif.setdefault(TAGS.get(k, k), v)
+        except Exception:
+            pass
+
+        result["exif_present"] = True
+        make = str(exif.get("Make", "")).strip() or None
+        model = str(exif.get("Model", "")).strip() or None
+        result["camera_make"] = make
+        result["camera_model"] = model
+        result["camera"] = " ".join(p for p in (make, model) if p) or None
+
+        software = str(exif.get("Software", "")).strip() or None
+        result["software"] = software
+        if software:
+            low = software.lower()
+            for tool in EDITING_SOFTWARE:
+                if tool in low:
+                    result["editing_software_detected"] = software
+                    break
+
+        result["creation_time"] = str(exif.get("DateTimeOriginal", "")).strip() or None
+        result["modify_time"] = str(exif.get("DateTime", "")).strip() or None
+        result["orientation"] = exif.get("Orientation")
+        result["lens"] = str(exif.get("LensModel", "")).strip() or None
+
+        try:
+            result["gps_present"] = _decode_gps(raw.get_ifd(0x8825))
+        except Exception:
+            result["gps_present"] = "GPSInfo" in exif
 
     except Exception as e:
-        log.warning("metadata_extraction_failed", path=image_path, error=str(e))
+        log.warning("exif_read_failed", error=str(e))
 
-    return metadata
+    return result
+
+
+def exif_capture_date(exif: Dict[str, Any]) -> Optional[str]:
+    """
+    The camera's own timestamp as ISO-8601, or None.
+    EXIF uses 'YYYY:MM:DD HH:MM:SS'; the date half needs its colons swapped.
+    """
+    raw = exif.get("creation_time") or exif.get("modify_time")
+    if not raw:
+        return None
+    try:
+        date_part, _, time_part = str(raw).partition(" ")
+        iso_date = date_part.replace(":", "-")
+        if len(iso_date) != 10:
+            return None
+        return f"{iso_date}T{time_part}" if time_part else iso_date
+    except Exception:
+        return None
+
+
+def fingerprint_image(image_path: str) -> Dict[str, Any]:
+    """
+    Stage 1 of the pipeline: identity + metadata of the untouched original.
+    Returns {image_hash, phash, width, height, format, mode, file_size_bytes, metadata}.
+    """
+    result: Dict[str, Any] = {
+        "image_hash": "",
+        "phash": "",
+        "width": 0,
+        "height": 0,
+        "format": "",
+        "mode": "",
+        "file_size_bytes": 0,
+        "metadata": {"exif_present": False},
+        "error": None,
+    }
+
+    if not image_path or not os.path.exists(image_path):
+        result["error"] = "Image file does not exist."
+        return result
+
+    try:
+        result["image_hash"] = sha256_of(image_path)
+        result["file_size_bytes"] = os.path.getsize(image_path)
+
+        with Image.open(image_path) as image:
+            image.load()
+            result["width"], result["height"] = image.size
+            result["format"] = image.format or ""
+            result["mode"] = image.mode
+            result["phash"] = perceptual_hash(image)
+            exif = extract_exif(image)
+            result["metadata"] = exif
+            exif["capture_date_iso"] = exif_capture_date(exif)
+
+    except Exception as e:
+        log.warning("fingerprint_failed", error=str(e))
+        result["error"] = str(e)
+
+    return result

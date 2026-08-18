@@ -1,292 +1,426 @@
 """
-services/image/reverse_engine.py — Unified Master Image Reverse Engine & Forensics Dispatcher.
+services/image/reverse_engine.py — the Reverse Image Engine.
 
-Integrates:
-  1. Image preservation (SHA256, dHash, pHash, EXIF)
-  2. Local Forensics (ELA, EXIF anomalies, Noise splicing, Copy-move)
-  3. Reverse Search (Google Cloud Vision Web Detection + SerpAPI Google Lens in parallel)
-  4. Match Ranking & Canonical Deduplication
-  5. Multi-tier Page Fetching & Publication Date Extraction
-  6. Provenance Calculation & Date Comparison (Recycled image detection)
+One entry point:
+
+    result = await reverse_image_check(image_path, claim_date=..., claim_text=...)
+
+It answers a question the claim-verification pipeline cannot: *where has this
+photograph been before?* That is provenance, and it is separate from whether
+the accompanying news claim is true. A genuine, unedited press photo from 2018
+attached to "flood in Bihar today" makes the message false without making the
+image fake. Those two findings stay separate all the way to the verdict card.
+
+Stages (see the module docstrings for the details of each):
+    1. metadata.fingerprint_image   SHA-256 + pHash + EXIF of the untouched file
+    2. image_forensics.run_forensics ELA, noise, copy-move, resampling, JPEG
+    3. google_vision.search ‖ serpapi_lens.search
+    4. match_ranker.rank_matches     dedupe across providers, rank by strength
+    5. date_extractor                fetch the top pages, extract publish dates
+    6. date comparison               earliest located appearance vs claim date
+
+Three honesty rules are enforced here rather than left to the caller:
+
+  * "No match located" is never reported as "original". An absent result means
+    the providers didn't find it — nothing more. `searched` records whether any
+    provider even ran, so an unconfigured key can't masquerade as a clean check.
+  * "Earliest located appearance", never "original date". We only ever see the
+    earliest copy our providers indexed.
+  * Only strong match types (exact/full/partial) can drive a recycled verdict.
+    A visually similar photo from 2018 is not this photo from 2018.
 """
 import asyncio
 import os
+import structlog
 import time
 from datetime import datetime, timezone
-from typing import Dict, Any, List, Optional
-import httpx
-import structlog
+from typing import Any, Dict, List, Optional
 
-from services.image.metadata import extract_metadata
-from services.image.google_vision import search_google_vision_web
-from services.image.serpapi_lens import search_serpapi_google_lens
-from services.image.date_extractor import extract_page_date, parse_date_string
-from services.image.match_ranker import rank_and_deduplicate_matches
-from services.image.image_forensics import run_image_forensics
+from src.config import settings
+from services.image import google_vision, serpapi_lens
+from services.image.date_extractor import (
+    enrich_matches_with_dates, extract_claim_date, parse_date,
+)
+from services.image.image_forensics import run_forensics
+from services.image.match_ranker import (
+    MATCH_WEIGHTS, STRONG_MATCH_TYPES, rank_matches,
+)
+from services.image.metadata import fingerprint_image
 
 log = structlog.get_logger(__name__)
 
-async def _analyze_image_with_gemini(image_path: str) -> Dict[str, Any]:
-    gemini_key = os.getenv("GEMINI_API_KEY") or getattr(settings, "gemini_api_key", "")
-    if not gemini_key or not os.path.exists(image_path):
-        return {}
+# ── image_status values ─────────────────────────────────────────────────────
+STATUS_RECYCLED = "RECYCLED"                    # strong match predates the claim
+STATUS_CONTEMPORANEOUS = "CONTEMPORANEOUS"      # matches line up with the claim
+STATUS_PREVIOUSLY_PUBLISHED = "PREVIOUSLY_PUBLISHED"  # seen before, no claim date to compare
+STATUS_SIMILAR_ONLY = "SIMILAR_ONLY"            # lookalikes only, not this image
+STATUS_NO_MATCHES = "NO_MATCHES_LOCATED"        # searched, found nothing
+STATUS_UNAVAILABLE = "SEARCH_UNAVAILABLE"       # no provider could run
 
-    try:
-        from google import genai
-        from PIL import Image
+# A gap smaller than this is ordinary news-cycle lag, not recycling.
+RECYCLED_MIN_GAP_DAYS = 30
 
-        client = genai.Client(api_key=gemini_key)
-        start_time = time.monotonic()
 
-        with Image.open(image_path) as PIL_img:
-            img = PIL_img.copy()
+def _empty_result(error: Optional[str] = None) -> Dict[str, Any]:
+    return {
+        "image_hash": "", "phash": "", "ai_generated_score": None,
+        "metadata": {"exif_present": False}, "forensics": {},
+        "reverse_matches": [], "earliest_located_date": None,
+        "earliest_located_match": None, "image_status": STATUS_UNAVAILABLE,
+        "date_analysis": {}, "providers": {}, "searched": False,
+        "notes": [], "error": error, "latency_ms": 0,
+    }
 
-        prompt = (
-            "You are an expert news photo investigator & reverse image search specialist.\n"
-            "Analyze this photograph carefully:\n"
-            "1. Identify the exact event, location, city, state, country, or context depicted (e.g. 'Kerala Floods August 2018 in Ranni/Pathanamthitta', '2020 Delhi Farmer Protests', etc.).\n"
-            "2. Read any visible storefront signboards, street names, vehicle license plates, or banners.\n"
-            "3. State the earliest known publication year or date of this photo if it is a classic or previously published news image.\n"
-            "4. Provide 2-3 specific news search queries to locate original news reporting of this photo.\n"
-            "Output valid JSON format strictly with keys: 'event_title', 'location', 'earliest_located_date', 'search_queries', 'is_recycled', 'explanation'."
-        )
 
-        models_to_try = ["gemini-3.5-flash-lite", "gemini-3.6-flash", "gemini-2.5-flash", "gemini-flash-latest"]
-        response = None
+def _earliest_strong_match(matches: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """
+    The earliest dated appearance among matches strong enough to *be* this image.
+    Low-authority mirrors are allowed, but only after real publishers: a
+    Pinterest repost dated 2016 is a weaker anchor than an NDTV article.
+    """
+    dated = [
+        m for m in matches
+        if m.get("match_type") in STRONG_MATCH_TYPES
+        and m.get("published_date")
+        and m.get("date_confidence", 0.0) >= 0.40
+    ]
+    if not dated:
+        return None
+    return min(
+        dated,
+        key=lambda m: (m["published_date"], m.get("low_authority", False)),
+    )
 
-        for m_name in models_to_try:
-            try:
-                resp = await asyncio.to_thread(
-                    client.models.generate_content,
-                    model=m_name,
-                    contents=[prompt, img]
-                )
-                if resp and resp.text:
-                    response = resp
-                    break
-            except Exception as m_err:
-                if "429" in str(m_err):
-                    await asyncio.sleep(0.5)
-                continue
 
-        if not response or not response.text:
-            return {}
+def _recycled_confidence(match: Dict[str, Any], gap_days: int, claim_confidence: float) -> float:
+    """
+    How much to trust a recycled call. Three independent things must hold, so
+    they multiply rather than add — a weak link in any one caps the result.
 
-        text = (response.text or "").strip()
-        elapsed = time.monotonic() - start_time
+      match strength — is this really the same image?
+      date strength  — do we trust the page's publication date?
+      gap size       — 8 years is decisive, 6 weeks is not
+    """
+    match_weight = MATCH_WEIGHTS.get(match.get("match_type", ""), 0.15)
+    date_weight = float(match.get("date_confidence") or 0.0)
+    gap_weight = min(1.0, gap_days / 365.0)
+    authority = 0.85 if match.get("low_authority") else 1.0
+    corroborated = 1.0 + (0.1 if len(match.get("sources", [])) > 1 else 0.0)
 
-        import json
-        import re
-        json_match = re.search(r'\{.*\}', text, re.DOTALL)
-        if json_match:
-            try:
-                parsed = json.loads(json_match.group(0))
-                parsed["processing_time"] = round(elapsed, 2)
-                return parsed
-            except Exception:
-                pass
+    score = match_weight * date_weight * gap_weight * authority * corroborated
+    score *= max(0.5, claim_confidence)  # an assumed claim date can't yield certainty
+    return round(min(0.97, score), 3)
 
+
+def _compare_dates(
+    matches: List[Dict[str, Any]],
+    claim_date: Optional[str],
+    claim_confidence: float,
+    exif_date: Optional[str],
+    searched: bool,
+) -> Dict[str, Any]:
+    """Stage 6 — turns the dated matches into a provenance status."""
+    earliest = _earliest_strong_match(matches)
+    has_any_match = bool(matches)
+    has_strong = any(m.get("match_type") in STRONG_MATCH_TYPES for m in matches)
+
+    analysis: Dict[str, Any] = {
+        "claim_date": claim_date,
+        "claim_date_confidence": round(claim_confidence, 2),
+        "earliest_located_date": earliest.get("published_date") if earliest else None,
+        "exif_capture_date": exif_date,
+        "date_difference_days": None,
+        "comparison_basis": None,
+    }
+
+    if not searched:
         return {
-            "explanation": text,
-            "processing_time": round(elapsed, 2)
+            "status": STATUS_UNAVAILABLE, "confidence": 0.0,
+            "analysis": analysis, "earliest_match": None,
+            "note": "Reverse image search did not run, so nothing is known about "
+                    "where this picture has appeared before.",
         }
 
-    except Exception as e:
-        log.warning("gemini_image_analysis_failed", error=str(e))
-        return {}
+    if not has_any_match:
+        return {
+            "status": STATUS_NO_MATCHES, "confidence": 0.0,
+            "analysis": analysis, "earliest_match": None,
+            "note": "No matching images were located online. This does NOT mean the "
+                    "image is original — only that our providers did not find a copy.",
+        }
+
+    if not has_strong:
+        return {
+            "status": STATUS_SIMILAR_ONLY, "confidence": 0.0,
+            "analysis": analysis, "earliest_match": None,
+            "note": "Only visually similar pictures were found, not this exact image. "
+                    "Similar-looking photos are not evidence about this one.",
+        }
+
+    if not earliest:
+        return {
+            "status": STATUS_PREVIOUSLY_PUBLISHED, "confidence": 0.0,
+            "analysis": analysis, "earliest_match": None,
+            "note": "This image has appeared online before, but no reliable publication "
+                    "date could be read from the pages carrying it.",
+        }
+
+    earliest_dt = parse_date(earliest["published_date"])
+    if not earliest_dt:
+        return {
+            "status": STATUS_PREVIOUSLY_PUBLISHED, "confidence": 0.0,
+            "analysis": analysis, "earliest_match": earliest, "note": "",
+        }
+
+    # Compare against the claim's date when we have one, otherwise against now.
+    reference_dt = parse_date(claim_date) if claim_date else None
+    if reference_dt:
+        analysis["comparison_basis"] = "claim_date"
+        effective_confidence = claim_confidence
+    else:
+        reference_dt = datetime.now(timezone.utc)
+        analysis["comparison_basis"] = "message_received"
+        # Treating "now" as the claim date assumes the sender means "recent".
+        effective_confidence = 0.55
+
+    gap_days = (reference_dt - earliest_dt).days
+    analysis["date_difference_days"] = gap_days
+
+    if gap_days > RECYCLED_MIN_GAP_DAYS:
+        confidence = _recycled_confidence(earliest, gap_days, effective_confidence)
+        years = gap_days / 365.25
+        span = f"{years:.1f} years" if years >= 1 else f"{gap_days} days"
+        return {
+            "status": STATUS_RECYCLED, "confidence": confidence,
+            "analysis": analysis, "earliest_match": earliest,
+            "note": f"This photograph was already online {span} before the date claimed "
+                    f"for it. The picture itself may be genuine — but it does not show "
+                    f"the event described.",
+        }
+
+    return {
+        "status": STATUS_CONTEMPORANEOUS, "confidence": 0.0,
+        "analysis": analysis, "earliest_match": earliest,
+        "note": "The earliest located appearance is consistent with the claimed date.",
+    }
+
+
+async def _run_providers(image_path: str, image_url: Optional[str]) -> Dict[str, Any]:
+    """Stage 4 — both reverse-search providers, concurrently."""
+    vision_result, lens_result = await asyncio.gather(
+        google_vision.search(image_path),
+        serpapi_lens.search(image_path, image_url=image_url),
+        return_exceptions=True,
+    )
+
+    providers: Dict[str, Any] = {}
+    matches: List[Dict[str, Any]] = []
+
+    for name, result in (("google_vision", vision_result), ("serpapi_lens", lens_result)):
+        if isinstance(result, Exception):
+            providers[name] = {"available": False, "error": str(result), "n_matches": 0}
+            continue
+        providers[name] = {
+            "available": result.get("available", False),
+            "error": result.get("error"),
+            "n_matches": len(result.get("matches", [])),
+        }
+        matches.extend(result.get("matches", []))
+
+    return {"matches": matches, "providers": providers, "vision": vision_result}
 
 
 async def reverse_image_check(
     image_path: str,
-    claimed_date: Optional[str] = None,
-    ai_generated_score: float = 0.0
+    claim_date: Optional[str] = None,
+    claim_text: str = "",
+    ai_generated_score: Optional[float] = None,
+    image_url: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Main entry point for reverse image engine and forensics.
-    
-    Returns structured dict per architectural spec:
-      {
-        "image_hash": str,
-        "dhash": str,
-        "phash": str,
-        "ai_generated_score": float,
-        "metadata": dict,
-        "forensics": dict,
-        "reverse_matches": List[Dict[str, Any]],
-        "earliest_located_date": str | None,
-        "earliest_located_source": str | None,
-        "image_status": str,  # RECYCLED, ORIGINAL_OR_NEW, UNVERIFIABLE
-        "date_analysis": dict,
-        "latency_ms": int
-      }
+    Full provenance check for one image.
+
+    Args:
+        image_path:  local file, left untouched
+        claim_date:  ISO date the claim asserts, if the caller already knows it
+        claim_text:  claim/OCR text; a date is extracted from it when claim_date is None
+        ai_generated_score: the existing AI detector's score, passed through so
+                     the result object carries the whole image picture. This
+                     engine never computes or second-guesses it.
+        image_url:   public URL for the image, if one exists (enables Lens)
+
+    Returns the provenance result object — see README for the full shape.
     """
-    start_time = time.monotonic()
+    start = time.monotonic()
 
-    if not os.path.exists(image_path):
-        raise FileNotFoundError(f"Image path does not exist: {image_path}")
+    if not image_path or not os.path.exists(image_path):
+        return {**_empty_result("Image file does not exist."), "ai_generated_score": ai_generated_score}
 
-    log.info("reverse_engine_start", path=image_path, claimed_date=claimed_date)
+    if not settings.reverse_search_enabled:
+        result = _empty_result("Reverse image search is disabled (REVERSE_SEARCH_ENABLED=false).")
+        result["ai_generated_score"] = ai_generated_score
+        return result
 
-    # ── STAGE 1: Metadata & Hashes ───────────────────────────────────────────
-    meta = extract_metadata(image_path)
+    # ── Stage 1: fingerprint the original ───────────────────────────────────
+    loop = asyncio.get_running_loop()
+    fingerprint = await loop.run_in_executor(None, fingerprint_image, image_path)
+    exif = fingerprint.get("metadata", {})
 
-    # ── STAGE 2: Local Forensics ──────────────────────────────────────────────
-    forensics = run_image_forensics(image_path, meta)
+    # ── Stage 2: claim date ─────────────────────────────────────────────────
+    claim_confidence = 0.9 if claim_date else 0.0
+    claim_date_method = "caller" if claim_date else None
+    if not claim_date and claim_text:
+        extracted = extract_claim_date(claim_text)
+        claim_date = extracted["date"]
+        claim_confidence = extracted["confidence"]
+        claim_date_method = extracted["method"]
 
-    # ── STAGE 3: Parallel Reverse Search (Gemini Visual + Vision + Lens) ──────
-    gemini_task = asyncio.create_task(_analyze_image_with_gemini(image_path))
-    vision_task = asyncio.create_task(search_google_vision_web(image_path))
-    lens_task = asyncio.create_task(search_serpapi_google_lens(image_path))
-
-    gemini_data, vision_res, lens_res = await asyncio.gather(
-        gemini_task, vision_task, lens_task, return_exceptions=True
+    # ── Stages 3 & 4: local forensics ‖ reverse search ──────────────────────
+    forensics, search = await asyncio.gather(
+        run_forensics(image_path),
+        _run_providers(image_path, image_url),
+        return_exceptions=True,
     )
 
-    gemini_info = gemini_data if isinstance(gemini_data, dict) else {}
-    google_vision_data = vision_res if isinstance(vision_res, dict) else {}
-    serpapi_lens_data = lens_res if isinstance(lens_res, dict) else {}
+    if isinstance(forensics, Exception):
+        log.warning("forensics_stage_failed", error=str(forensics))
+        forensics = {"manipulation_score": 0.0, "signals": [], "error": str(forensics)}
+    if isinstance(search, Exception):
+        log.warning("search_stage_failed", error=str(search))
+        search = {"matches": [], "providers": {}, "vision": {}}
 
-    # ── STAGE 4: Free Web News Search via Gemini Extracted Queries ────────────
-    from src.pipelines.text.adapters.web_news import search_web_news
-    web_news_matches = []
-    queries = gemini_info.get("search_queries", [])
-    if not queries and gemini_info.get("event_title"):
-        queries = [gemini_info["event_title"]]
+    providers = search.get("providers", {})
+    searched = any(p.get("available") for p in providers.values())
 
-    for q in queries[:2]:
-        try:
-            news_res = await search_web_news(q)
-            for item in news_res:
-                web_news_matches.append({
-                    "url": item.source_url,
-                    "canonical_url": item.source_url,
-                    "match_type": "FULL_MATCH",
-                    "similarity_weight": 0.85,
-                    "source_provider": f"News ({item.source_name})",
-                    "page_title": item.original_claim,
-                    "published_date": item.fact_check_date,
-                    "date_confidence": 0.90
-                })
-        except Exception:
-            pass
+    # ── Stage 5: rank, then date the top pages ──────────────────────────────
+    matches = rank_matches(search.get("matches", []))
+    if matches:
+        matches = await enrich_matches_with_dates(matches)
 
-    # ── STAGE 5: Normalize & Rank Matches ───────────────────────────────────────
-    ranked_matches = rank_and_deduplicate_matches(google_vision_data, serpapi_lens_data)
-    
-    # Prepend web news matches if found
-    for w_m in web_news_matches:
-        if not any(m["url"] == w_m["url"] for m in ranked_matches):
-            ranked_matches.append(w_m)
+    # ── Stage 6: compare dates ──────────────────────────────────────────────
+    exif_date = exif.get("capture_date_iso")
+    comparison = _compare_dates(matches, claim_date, claim_confidence, exif_date, searched)
 
-    # ── STAGE 6: Fetch Top Pages & Extract Publication Dates ───────────────────
-    top_matches = ranked_matches[:8]
-    if top_matches:
-        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as http_client:
-            fetch_tasks = [
-                extract_page_date(m["url"], client=http_client)
-                for m in top_matches if not m.get("published_date")
-            ]
-            if fetch_tasks:
-                page_date_results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
+    vision = search.get("vision") or {}
+    context_labels = vision.get("best_guess_labels", []) if isinstance(vision, dict) else []
+    entities = [e["description"] for e in (vision.get("entities", []) if isinstance(vision, dict) else [])]
 
-                for i, p_res in enumerate(page_date_results):
-                    if isinstance(p_res, dict) and p_res.get("published_date"):
-                        top_matches[i]["published_date"] = p_res["published_date"]
-                        top_matches[i]["date_confidence"] = p_res["date_confidence"]
-                        if not top_matches[i].get("page_title") and p_res.get("page_title"):
-                            top_matches[i]["page_title"] = p_res["page_title"]
+    notes = [comparison["note"]] if comparison.get("note") else []
+    for name, info in providers.items():
+        if not info.get("available") and info.get("error"):
+            notes.append(f"{name} unavailable: {info['error']}")
 
-    # ── STAGE 7: Calculate Provenance & Date Comparison ─────────────────────────
-    earliest_date_str = None
-    earliest_dt = None
-    earliest_source_url = None
+    result = {
+        "image_hash": fingerprint.get("image_hash", ""),
+        "phash": fingerprint.get("phash", ""),
+        "dimensions": {"width": fingerprint.get("width", 0), "height": fingerprint.get("height", 0)},
+        "format": fingerprint.get("format", ""),
+        "file_size_bytes": fingerprint.get("file_size_bytes", 0),
 
-    # Check if Gemini extracted a valid earliest date (e.g. 2018-08-14)
-    gemini_date_str = gemini_info.get("earliest_located_date")
-    if gemini_date_str:
-        gemini_dt = parse_date_string(gemini_date_str)
-        if gemini_dt:
-            earliest_dt = gemini_dt
-            earliest_date_str = gemini_date_str
-            earliest_source_url = "Gemini Visual Archive Inspection"
+        "ai_generated_score": ai_generated_score,
+        "metadata": exif,
+        "forensics": forensics,
 
-    # Filter matches with valid publication dates
-    matches_with_dates = []
-    for m in ranked_matches:
-        if m.get("published_date"):
-            dt = parse_date_string(m["published_date"])
-            if dt:
-                matches_with_dates.append((dt, m["published_date"], m["url"]))
+        "reverse_matches": matches[:settings.reverse_search_max_matches],
+        "n_matches_total": len(matches),
+        "earliest_located_date": comparison["analysis"].get("earliest_located_date"),
+        "earliest_located_match": comparison.get("earliest_match"),
 
-    if matches_with_dates:
-        matches_with_dates.sort(key=lambda x: x[0])
-        first_dt, first_date_str, first_url = matches_with_dates[0]
-        if not earliest_dt or first_dt < earliest_dt:
-            earliest_dt = first_dt
-            earliest_date_str = first_date_str
-            earliest_source_url = first_url
+        "image_status": comparison["status"],
+        "status_confidence": comparison["confidence"],
+        "date_analysis": {
+            **comparison["analysis"],
+            "claim_date_method": claim_date_method,
+        },
 
-    # Calculate date analysis & recycled status
-    image_status = "ORIGINAL_OR_NEW"
-    date_diff_days = None
-    recycled_conf = 0.0
-
-    now_utc = datetime.now(timezone.utc)
-    target_claim_dt = parse_date_string(claimed_date) if claimed_date else now_utc
-
-    if earliest_dt:
-        date_diff_days = (target_claim_dt - earliest_dt).days
-
-        if claimed_date and date_diff_days > 30:
-            image_status = "RECYCLED"
-            recycled_conf = min(1.0, date_diff_days / 365.0)
-
-        elif (now_utc - earliest_dt).days > 180 or gemini_info.get("is_recycled"):
-            image_status = "RECYCLED"
-            recycled_conf = 0.90
-            if date_diff_days is None:
-                date_diff_days = (now_utc - earliest_dt).days
-
-    if not ranked_matches and not gemini_info.get("event_title") and (google_vision_data.get("error") and serpapi_lens_data.get("error")):
-        image_status = "UNVERIFIABLE"
-
-    elapsed_ms = int((time.monotonic() - start_time) * 1000)
+        "context_labels": context_labels,
+        "web_entities": entities[:5],
+        "providers": providers,
+        "searched": searched,
+        "notes": notes,
+        "error": None,
+        "latency_ms": int((time.monotonic() - start) * 1000),
+    }
 
     log.info(
-        "reverse_engine_complete",
-        status=image_status,
-        matches=len(ranked_matches),
-        earliest_date=earliest_date_str,
-        date_diff=date_diff_days,
-        latency_ms=elapsed_ms
+        "reverse_image_check_done",
+        status=result["image_status"],
+        confidence=result["status_confidence"],
+        n_matches=len(matches),
+        earliest=result["earliest_located_date"],
+        latency_ms=result["latency_ms"],
     )
+    return result
 
-    camera_str = f"{meta.get('camera_make', '')} {meta.get('camera_model', '')}".strip()
 
-    return {
-        "image_hash": meta.get("sha256", ""),
-        "dhash": meta.get("dhash", ""),
-        "phash": meta.get("phash", ""),
-        "ai_generated_score": ai_generated_score,
-        "metadata": {
-            "exif_present": meta.get("exif_present", False),
-            "camera": camera_str,
-            "software": meta.get("software", ""),
-            "creation_time": meta.get("creation_time", ""),
-            "gps_present": meta.get("gps_present", False),
-            "dimensions": meta.get("dimensions", [0, 0])
-        },
-        "forensics": forensics,
-        "gemini_visual_info": gemini_info,
-        "reverse_matches": ranked_matches,
-        "earliest_located_date": earliest_date_str,
-        "earliest_located_source": earliest_source_url,
-        "image_status": image_status,
-        "date_analysis": {
-            "claim_date": claimed_date,
-            "earliest_located_date": earliest_date_str,
-            "date_difference_days": date_diff_days,
-            "recycled_confidence": round(recycled_conf, 2)
-        },
-        "latency_ms": elapsed_ms
-    }
+# ─────────────────────────────────────────────────────────────────────────────
+#  Presentation
+# ─────────────────────────────────────────────────────────────────────────────
+
+_STATUS_HEADLINE = {
+    STATUS_RECYCLED: "🔁 LIKELY RECYCLED / OUT OF CONTEXT",
+    STATUS_CONTEMPORANEOUS: "🗓️ Consistent with the claimed date",
+    STATUS_PREVIOUSLY_PUBLISHED: "🌐 Published online before",
+    STATUS_SIMILAR_ONLY: "🔎 Only similar images found",
+    STATUS_NO_MATCHES: "🔎 No earlier copies located",
+    STATUS_UNAVAILABLE: "⚠️ Provenance check unavailable",
+}
+
+
+def _friendly_date(iso: Optional[str]) -> str:
+    parsed = parse_date(iso) if iso else None
+    return parsed.strftime("%d %B %Y") if parsed else "unknown"
+
+
+def render_image_analysis(result: Dict[str, Any]) -> str:
+    """
+    The IMAGE ANALYSIS block for the Telegram card, as Telegram-flavoured HTML.
+
+    Deliberately reports image authenticity ONLY. The claim's verdict is
+    rendered separately by the caller, because conflating "this photo is old"
+    with "this statement is false" is exactly the error this engine exists to
+    avoid.
+    """
+    if not result or result.get("error"):
+        return ""
+
+    lines = ["🖼️ <b>IMAGE ANALYSIS</b>"]
+
+    ai_score = result.get("ai_generated_score")
+    if ai_score is not None:
+        lines.append(f"• AI-generated probability: <b>{float(ai_score) * 100:.0f}%</b>")
+
+    forensics = result.get("forensics") or {}
+    manip = float(forensics.get("manipulation_score") or 0.0)
+    level = "Low" if manip < 0.35 else ("Moderate" if manip < 0.6 else "High")
+    lines.append(f"• Manipulation signals: <b>{level}</b>")
+    for signal in (forensics.get("signals") or [])[:2]:
+        lines.append(f"   ◦ <i>{signal}</i>")
+
+    status = result.get("image_status", STATUS_UNAVAILABLE)
+    lines.append(f"• Reverse search: <b>{_STATUS_HEADLINE.get(status, status)}</b>")
+
+    earliest = result.get("earliest_located_date")
+    if earliest:
+        lines.append(f"• Earliest located appearance: <b>{_friendly_date(earliest)}</b>")
+        match = result.get("earliest_located_match") or {}
+        if match.get("domain"):
+            lines.append(f"   ◦ Source: {match['domain']}")
+
+    analysis = result.get("date_analysis") or {}
+    gap = analysis.get("date_difference_days")
+    if analysis.get("claim_date"):
+        lines.append(f"• Claimed date: {_friendly_date(analysis['claim_date'])}")
+    if gap and gap > RECYCLED_MIN_GAP_DAYS:
+        years = gap / 365.25
+        span = f"~{years:.1f} years" if years >= 1 else f"{gap} days"
+        lines.append(f"• Difference: <b>{span}</b>")
+
+    labels = result.get("context_labels") or []
+    if labels and status in (STATUS_RECYCLED, STATUS_PREVIOUSLY_PUBLISHED):
+        lines.append(f"• Context: this picture is indexed as “{labels[0]}”")
+
+    for note in (result.get("notes") or [])[:1]:
+        lines.append(f"\n<i>{note}</i>")
+
+    return "\n".join(lines)

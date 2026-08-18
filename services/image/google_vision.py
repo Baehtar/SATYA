@@ -1,157 +1,199 @@
 """
-services/image/google_vision.py — Google Cloud Vision Web Detection REST client.
-Uploads local images directly via base64 payload to Google Cloud Vision API.
+services/image/google_vision.py — Reverse search via Google Cloud Vision
+Web Detection.
+
+This is the primary provider because it takes the image bytes directly: a
+Telegram photo goes straight from `temp/<id>.jpg` to the API as base64, with no
+need to publish it to a public URL first. That matters for privacy as much as
+for plumbing — the user's image never gets hosted anywhere.
+
+Called over plain REST with an API key rather than through the
+`google-cloud-vision` SDK. httpx is already a dependency and the SDK would pull
+in grpc plus the whole google-api-core stack for one endpoint.
+
+Web Detection returns five fields, which map onto our match vocabulary:
+    fullMatchingImages       → FULL_MATCH   (the same image, possibly re-encoded)
+    partialMatchingImages    → PARTIAL_MATCH (a crop of it, or it inside a collage)
+    pagesWithMatchingImages  → the pages carrying either of the above
+    visuallySimilarImages    → HIGH/LOW_VISUAL_SIMILARITY (a different photo!)
+    webEntities              → topic labels, used for context, never as matches
 """
 import base64
-import os
-import httpx
 import structlog
-from typing import Dict, Any, List, Optional
-from src.config import settings
+from typing import Any, Dict, List
+
+import httpx
+
+from src.config import is_real_key, settings
+from services.image.match_ranker import (
+    FULL_MATCH, HIGH_VISUAL_SIMILARITY, LOW_VISUAL_SIMILARITY,
+    PARTIAL_MATCH, normalise_match,
+)
 
 log = structlog.get_logger(__name__)
 
-VISION_API_ENDPOINT = "https://vision.googleapis.com/v1/images:annotate"
+VISION_ENDPOINT = "https://vision.googleapis.com/v1/images:annotate"
+
+PROVIDER = "google_vision"
+
+# Vision hands back a lot of weak "visually similar" noise; keep the head of it.
+MAX_VISUALLY_SIMILAR = 8
+MAX_RESULTS_PER_FIELD = 20
 
 
-async def search_google_vision_web(image_path: str) -> Dict[str, Any]:
+def is_configured() -> bool:
+    return is_real_key(settings.google_vision_api_key)
+
+
+def _pages(web: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
-    Performs Google Cloud Vision Web Detection on a local image file.
-    
-    Returns:
-      {
-        "provider": "google_vision",
-        "best_guess_labels": List[str],
-        "full_matching_images": List[Dict[str, str]],
-        "partial_matching_images": List[Dict[str, str]],
-        "pages_with_matching_images": List[Dict[str, str]],
-        "visually_similar_images": List[Dict[str, str]],
-        "web_entities": List[Dict[str, Any]],
-        "error": Optional[str]
-      }
+    Pages carrying the image. A page is classified by what it actually holds:
+    a full match beats a partial one, and a page listing neither is still a
+    match — Vision only puts it here when it found the image on it.
     """
-    api_key = (
-        os.getenv("GOOGLE_VISION_API_KEY")
-        or os.getenv("GOOGLE_CLOUD_VISION_API_KEY")
-        or getattr(settings, "google_vision_api_key", "")
-    )
+    out = []
+    for page in (web.get("pagesWithMatchingImages") or [])[:MAX_RESULTS_PER_FIELD]:
+        url = page.get("url") or ""
+        if not url:
+            continue
+        if page.get("fullMatchingImages"):
+            match_type = FULL_MATCH
+        elif page.get("partialMatchingImages"):
+            match_type = PARTIAL_MATCH
+        else:
+            match_type = FULL_MATCH
+        out.append(normalise_match(
+            url=url,
+            match_type=match_type,
+            source=PROVIDER,
+            page_title=page.get("pageTitle") or "",
+            image_url=(page.get("fullMatchingImages") or [{}])[0].get("url", ""),
+        ))
+    return out
 
-    result: Dict[str, Any] = {
-        "provider": "google_vision",
-        "best_guess_labels": [],
-        "full_matching_images": [],
-        "partial_matching_images": [],
-        "pages_with_matching_images": [],
-        "visually_similar_images": [],
-        "web_entities": [],
-        "error": None
+
+def _bare_images(web: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Direct image hits with no containing page. Their URL is the image file, so
+    they rarely yield a publication date, but they still prove the image is
+    indexed somewhere and can carry a usable /2019/03/ path.
+    """
+    out = []
+    for field, match_type in (
+        ("fullMatchingImages", FULL_MATCH),
+        ("partialMatchingImages", PARTIAL_MATCH),
+    ):
+        for item in (web.get(field) or [])[:MAX_RESULTS_PER_FIELD]:
+            url = item.get("url") or ""
+            if url:
+                out.append(normalise_match(
+                    url=url, match_type=match_type, source=PROVIDER, image_url=url,
+                ))
+    return out
+
+
+def _visually_similar(web: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    NOT the same image — a different photograph that looks alike. Weighted low
+    on purpose: a similar-looking flood photo from 2018 says nothing about the
+    image in hand.
+    """
+    out = []
+    items = (web.get("visuallySimilarImages") or [])[:MAX_VISUALLY_SIMILAR]
+    for index, item in enumerate(items):
+        url = item.get("url") or ""
+        if not url:
+            continue
+        # Vision returns these roughly best-first and gives no score.
+        match_type = HIGH_VISUAL_SIMILARITY if index < 3 else LOW_VISUAL_SIMILARITY
+        out.append(normalise_match(
+            url=url, match_type=match_type, source=PROVIDER, image_url=url,
+        ))
+    return out
+
+
+def parse_web_detection(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Turns a raw Vision response into {matches, entities, best_guess_labels}."""
+    responses = payload.get("responses") or [{}]
+    first = responses[0] if responses else {}
+
+    if first.get("error"):
+        message = first["error"].get("message", "Vision returned an error")
+        return {"matches": [], "entities": [], "best_guess_labels": [], "error": message}
+
+    web = first.get("webDetection") or {}
+
+    entities = [
+        {"description": e.get("description", ""), "score": float(e.get("score") or 0.0)}
+        for e in (web.get("webEntities") or [])
+        if e.get("description")
+    ]
+    labels = [
+        label.get("label", "") for label in (web.get("bestGuessLabels") or [])
+        if label.get("label")
+    ]
+
+    matches = _pages(web) + _bare_images(web) + _visually_similar(web)
+    return {
+        "matches": matches,
+        "entities": entities[:10],
+        "best_guess_labels": labels,
+        "error": None,
     }
 
-    if not api_key:
-        log.warning("google_vision_key_missing")
-        result["error"] = "Google Vision API key missing"
-        return result
 
-    if not os.path.exists(image_path):
-        result["error"] = f"Image file not found: {image_path}"
-        return result
+async def search(image_path: str, timeout: float | None = None) -> Dict[str, Any]:
+    """
+    Runs Web Detection on a local file.
+    Returns {matches, entities, best_guess_labels, available, error}.
+    `available=False` means the provider could not run at all — which is very
+    different from "ran and found nothing", and the caller must not conflate them.
+    """
+    unavailable = {
+        "matches": [], "entities": [], "best_guess_labels": [], "available": False,
+    }
+
+    if not is_configured():
+        return {**unavailable, "error": "GOOGLE_VISION_API_KEY is not configured."}
 
     try:
         with open(image_path, "rb") as f:
-            image_bytes = f.read()
-        
-        base64_encoded = base64.b64encode(image_bytes).decode("utf-8")
+            encoded = base64.b64encode(f.read()).decode("ascii")
+    except Exception as e:
+        return {**unavailable, "error": f"Could not read image: {e}"}
 
-        payload = {
-            "requests": [
-                {
-                    "image": {
-                        "content": base64_encoded
-                    },
-                    "features": [
-                        {
-                            "type": "WEB_DETECTION",
-                            "maxResults": 20
-                        }
-                    ]
-                }
-            ]
-        }
+    body = {
+        "requests": [{
+            "image": {"content": encoded},
+            "features": [{"type": "WEB_DETECTION", "maxResults": MAX_RESULTS_PER_FIELD}],
+            "imageContext": {"webDetectionParams": {"includeGeoResults": False}},
+        }]
+    }
 
-        url = f"{VISION_API_ENDPOINT}?key={api_key}"
-
-        async with httpx.AsyncClient(timeout=25.0) as client:
+    try:
+        async with httpx.AsyncClient(timeout=timeout or settings.reverse_search_timeout) as client:
             response = await client.post(
-                url,
-                json=payload,
-                headers={"Content-Type": "application/json"}
+                VISION_ENDPOINT,
+                params={"key": settings.google_vision_api_key},
+                json=body,
             )
 
         if response.status_code != 200:
-            log.warning("google_vision_http_error", status_code=response.status_code, body=response.text[:200])
-            result["error"] = f"HTTP {response.status_code}: {response.text[:100]}"
-            return result
+            detail = response.text[:200]
+            log.warning("vision_http_error", status=response.status_code, detail=detail)
+            return {**unavailable, "error": f"Vision API returned {response.status_code}: {detail}"}
 
-        data = response.json()
-
-        responses = data.get("responses", [])
-        if not responses:
-            return result
-
-        web_detection = responses[0].get("webDetection", {})
-
-        # 1. Best guess labels
-        for bg in web_detection.get("bestGuessLabels", []):
-            label = bg.get("label", "").strip()
-            if label:
-                result["best_guess_labels"].append(label)
-
-        # 2. Full matching images
-        for img in web_detection.get("fullMatchingImages", []):
-            u = img.get("url", "")
-            if u:
-                result["full_matching_images"].append({"url": u, "page_title": ""})
-
-        # 3. Partial matching images
-        for img in web_detection.get("partialMatchingImages", []):
-            u = img.get("url", "")
-            if u:
-                result["partial_matching_images"].append({"url": u, "page_title": ""})
-
-        # 4. Pages with matching images
-        for page in web_detection.get("pagesWithMatchingImages", []):
-            p_url = page.get("url", "")
-            p_title = page.get("pageTitle", "")
-            if p_url:
-                result["pages_with_matching_images"].append({
-                    "url": p_url,
-                    "page_title": p_title,
-                    "full_matching_images": [i.get("url", "") for i in page.get("fullMatchingImages", [])],
-                    "partial_matching_images": [i.get("url", "") for i in page.get("partialMatchingImages", [])],
-                })
-
-        # 5. Visually similar images
-        for img in web_detection.get("visuallySimilarImages", []):
-            u = img.get("url", "")
-            if u:
-                result["visually_similar_images"].append({"url": u, "page_title": ""})
-
-        # 6. Web entities
-        for entity in web_detection.get("webEntities", []):
-            desc = entity.get("description", "")
-            score = entity.get("score", 0.0)
-            if desc:
-                result["web_entities"].append({"description": desc, "score": score})
+        parsed = parse_web_detection(response.json())
+        if parsed.get("error"):
+            return {**unavailable, "error": parsed["error"]}
 
         log.info(
-            "google_vision_web_detection_done",
-            pages=len(result["pages_with_matching_images"]),
-            full=len(result["full_matching_images"]),
-            partial=len(result["partial_matching_images"])
+            "vision_web_detection_done",
+            n_matches=len(parsed["matches"]),
+            labels=parsed["best_guess_labels"][:2],
         )
+        return {**parsed, "available": True}
 
     except Exception as e:
-        log.error("google_vision_failed", error=str(e))
-        result["error"] = str(e)
-
-    return result
+        log.warning("vision_search_failed", error=str(e))
+        return {**unavailable, "error": str(e)}

@@ -22,7 +22,9 @@ ENV/
 pip-wheel-metadata/
 
 # === ML Models (large files — download at runtime) ===
-models/
+# Anchored to the repo root on purpose: a bare "models/" also swallows
+# src/models/, which holds the shared schema contracts.
+/models/
 *.bin
 *.safetensors
 *.pt
