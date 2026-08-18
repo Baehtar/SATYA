@@ -60,4 +60,36 @@ async def download_voice(message, bot):
 
     await telegram_file.download_to_drive(path)
 
-    return path
+    return path
+
+
+async def download_video(message, bot):
+
+    if message.video:
+        vid_obj = message.video
+        filename = getattr(vid_obj, "file_name", "") or ""
+        ext = os.path.splitext(filename)[1].lower() or ".mp4"
+    elif message.video_note:
+        vid_obj = message.video_note
+        ext = ".mp4"
+    elif message.document:
+        vid_obj = message.document
+        filename = getattr(vid_obj, "file_name", "") or ""
+        ext = os.path.splitext(filename)[1].lower() or ".mp4"
+    else:
+        raise ValueError("Message does not contain video, video_note, or document")
+
+    telegram_file = await bot.get_file(
+        vid_obj.file_id
+    )
+
+    os.makedirs("temp", exist_ok=True)
+
+    path = os.path.join(
+        "temp",
+        f"{vid_obj.file_unique_id}{ext}"
+    )
+
+    await telegram_file.download_to_drive(path)
+
+    return path

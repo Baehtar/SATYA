@@ -570,3 +570,18 @@ async def check_mixed(image_path: str, caption: str, progress_callback=None):
         "claim_type": text_result.get("claim_type", "other"),
         "sources": sources,
     }
+
+
+async def check_video(video_path: str, caption: str = "", progress_callback=None, mode: str = None):
+    """
+    Multimodal Deepfake Video Verification Pipeline.
+    - Extracts video keyframes & analyzes visual face-swap/AI synthesis across frames
+    - Extracts audio track & checks for synthetic voice clone + Whisper STT
+    - Cross-references provenance & fact-checks claims from speech/caption
+    """
+    from services.video.deepfake_detector import analyze_video_deepfake
+    return await analyze_video_deepfake(
+        video_path,
+        caption=caption,
+        progress_callback=progress_callback
+    )

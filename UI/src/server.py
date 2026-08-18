@@ -45,7 +45,7 @@ try:
     DASHBOARD_AVAILABLE = True
 except ImportError:  # pragma: no cover - depends on the install
     DASHBOARD_AVAILABLE = False
-from services.ml_service import check_image, check_mixed, check_text, check_voice
+from services.ml_service import check_image, check_mixed, check_text, check_video, check_voice
 from services.audio.convert import extract_audio_from_video
 from UI.src.adapter import build_card
 
@@ -206,6 +206,7 @@ async def _run_analysis(
     image_path: Optional[str],
     audio_path: Optional[str],
     mode: str,
+    video_path: Optional[str] = None,
     extra_paths: Optional[list] = None,
 ) -> None:
     """Runs the shared pipeline, streaming progress into `queue`."""
@@ -233,7 +234,9 @@ async def _run_analysis(
 
     try:
         async with asyncio.timeout(settings.total_timeout):
-            if mode == MODE_AI_IMAGE:
+            if video_path:
+                result = await check_video(video_path, caption=text, progress_callback=progress)
+            elif mode == MODE_AI_IMAGE:
                 # Authenticity only — the caption, OCR and fact-check search are
                 # deliberately skipped so the answer is just about the picture.
                 result = await check_image(image_path, progress_callback=progress, mode=MODE_AI_IMAGE)
@@ -373,7 +376,8 @@ async def create_check(
     job = Job()
     job.task = asyncio.create_task(
         _run_analysis(job_id, job.queue, text, image_path, audio_path, mode,
-                      extra_paths=[video_path, extracted_audio_path])
+                      video_path=video_path,
+                      extra_paths=[video_path, extracted_audio_path] if extracted_audio_path else [video_path])
     )
     _jobs[job_id] = job
 

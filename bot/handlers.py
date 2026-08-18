@@ -6,7 +6,8 @@ from services.ml_service import (
     check_text,
     check_image,
     check_voice,
-    check_mixed
+    check_mixed,
+    check_video
 )
 
 from telegram import (
@@ -33,7 +34,8 @@ from UI.src.adapter import build_card
 
 from utils.telegram_files import (
     download_photo,
-    download_voice
+    download_voice,
+    download_video
 )
 
 # Bot checks feed the same trend dashboard the web portal does (/dashboard).
@@ -50,6 +52,8 @@ TREND_MESSAGE_TYPES = {
     MessageType.IMAGE: "image",
     MessageType.IMAGE_WITH_CAPTION: "image_caption",
     MessageType.VOICE: "voice",
+    MessageType.VIDEO: "video",
+    MessageType.VIDEO_WITH_CAPTION: "video",
 }
 
 
@@ -72,6 +76,8 @@ async def start(
         "<i>Detect if an image is AI-generated (SDXL/Midjourney/DALL-E), inspect reverse search provenance & EXIF forensics.</i>\n\n"
         "3️⃣ <b>Verify Audio / Voice Note</b>\n"
         "<i>Transcribe audio voice notes (Whisper AI) & fact-check extracted spoken news claims.</i>\n\n"
+        "4️⃣ <b>Deepfake Video Detection</b>\n"
+        "<i>Detect face-swap/diffusion synthetic manipulation across video frames, voice clones, and video provenance.</i>\n\n"
         "👇 <b>Select an option below or send your content directly:</b>"
     )
 
@@ -94,6 +100,12 @@ async def start(
                     "🎤 3. Verify Audio / Voice Note",
                     callback_data="mode_audio"
                 )
+            ],
+            [
+                InlineKeyboardButton(
+                    "🎬 4. Deepfake Video Detection",
+                    callback_data="mode_video"
+                )
             ]
         ]
     )
@@ -113,7 +125,8 @@ async def help_command(
         "📖 <b>Satya Analysis Modes Guide</b>\n\n"
         "1️⃣ <b>Fake News Detection:</b> Send written news claims, viral text, or news clipping/screenshot images to extract text & verify news claims against PIB, Alt News, BOOM & Google News.\n"
         "2️⃣ <b>Fake AI Image Detection:</b> Send photos or images to test for synthetic/AI visual generation, reverse image search provenance, earliest online appearance dates, and EXIF/ELA forensics.\n"
-        "3️⃣ <b>Verify Audio / Voice Note:</b> Send audio files or Telegram voice notes to transcribe spoken speech (Whisper ASR) & verify news claims.\n\n"
+        "3️⃣ <b>Verify Audio / Voice Note:</b> Send audio files or Telegram voice notes to transcribe spoken speech (Whisper ASR) & verify news claims.\n"
+        "4️⃣ <b>Deepfake Video Detection:</b> Send video clips (MP4/MOV) to extract keyframes, inspect facial deepfakes, check voice cloning, and verify spoken claims.\n\n"
         "Use /start to reset options anytime."
     )
 
@@ -141,7 +154,7 @@ async def _log_to_dashboard(
         message_type=TREND_MESSAGE_TYPES.get(message_type, "text"),
         latency_ms=latency_ms,
         user_id=user_id,
-        mode="ai_image" if mode == "ai_image" else "fake_news"
+        mode="ai_image" if mode == "ai_image" else ("video" if mode == "video" else "fake_news")
     )
 
 
@@ -250,6 +263,36 @@ async def handle_message(
                     except Exception:
                         pass
 
+        # -----------------------------
+        # VIDEO (DEEPFAKE & AUTHENTICITY ANALYSIS)
+        # -----------------------------
+        elif message_type in (MessageType.VIDEO, MessageType.VIDEO_WITH_CAPTION):
+            async def progress_cb(text: str, step: str = ""):
+                try:
+                    await checking.edit_text(f"<b>Satya Video Engine</b>\n\n{text}", parse_mode="HTML")
+                except Exception:
+                    pass
+
+            video_path = None
+            try:
+                video_path = await download_video(
+                    message,
+                    context.bot
+                )
+                caption = getattr(message, "caption", "") or ""
+                result = await check_video(
+                    video_path,
+                    caption=caption,
+                    progress_callback=progress_cb,
+                    mode=context.user_data.get("selected_mode")
+                )
+            finally:
+                if video_path and os.path.exists(video_path):
+                    try:
+                        os.unlink(video_path)
+                    except Exception:
+                        pass
+
         else:
             result = {
                 "verdict": "UNVERIFIABLE",
@@ -274,7 +317,7 @@ async def handle_message(
         # -----------------------------
         latency_ms = int((time.monotonic() - started_at) * 1000)
         try:
-            sub_text = message.text or message.caption or result.get("extracted_claim", "")
+            sub_text = message.text or getattr(message, "caption", "") or result.get("extracted_claim", "") or result.get("transcript", "")
             card = await build_card(
                 result,
                 submitted_text=sub_text,
@@ -350,6 +393,14 @@ async def button_handler(
         await query.message.reply_text(
             "🎤 <b>Option 3 Selected: Verify Audio / Voice Note</b>\n\n"
             "Please send or forward the Telegram voice note or audio recording (MP3, WAV, OGG, M4A) you want to transcribe & verify.",
+            parse_mode="HTML"
+        )
+
+    elif query.data == "mode_video":
+        context.user_data["selected_mode"] = "video"
+        await query.message.reply_text(
+            "🎬 <b>Option 4 Selected: Deepfake Video Detection</b>\n\n"
+            "Please send or forward the video file (MP4, MOV, WebM, MKV) to inspect for AI face-swaps, synthetic speech, and fact-check claims.",
             parse_mode="HTML"
         )
 

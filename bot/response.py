@@ -1,10 +1,10 @@
 """
 bot/response.py — Comprehensive verdict card formatter for Telegram.
 Includes:
-- Big visual emoji & bilingual verdict header
+- Big visual emoji & bilingual verdict header (supporting Text, Image, Audio, and Deepfake Video)
 - Grandparent-friendly 2-line explanations in English + Hindi/Hinglish
-- Reverse search & image provenance details
-- Full technical breakdown in English (AI scores, Forensics, Language, Latency)
+- Reverse search & image/video provenance details
+- Full technical breakdown in English (AI scores, Forensics, Keyframe analysis, Language, Latency)
 - Verified fact-check source links
 """
 import html
@@ -23,17 +23,25 @@ def verdict_emoji(verdict: str) -> str:
     return "🟡"
 
 
-def verdict_title_bilingual(verdict: str) -> str:
+def verdict_title_bilingual(verdict: str, media_type: str = "") -> str:
     v = (verdict or "").upper()
+    is_video = media_type.lower() == "video"
+
     if v == "LIKELY_TRUE":
         return "LIKELY TRUE · सच होने की संभावना"
     if v == "LIKELY_FALSE":
         return "LIKELY FALSE · गलत / फ़र्ज़ी संदेश"
     if v == "AI_GENERATED":
+        if is_video:
+            return "AI DEEPFAKE VIDEO · एआई डीपफ़ेक वीडियो"
         return "AI GENERATED · एआई द्वारा निर्मित तस्वीर"
     if v == "MANIPULATED":
+        if is_video:
+            return "MANIPULATED VIDEO · वीडियो में छेड़छाड़"
         return "DIGITALLY EDITED · फोटो में छेड़छाड़"
     if v == "MISLEADING_CONTEXT":
+        if is_video:
+            return "MISLEADING CONTEXT · पुराना वीडियो गलत संदर्भ में"
         return "MISLEADING CONTEXT · पुरानी फोटो गलत संदर्भ में"
     if v == "AUTHENTIC_IMAGE":
         return "AUTHENTIC PHOTO · वास्तविक तस्वीर"
@@ -67,9 +75,12 @@ def format_verdict(result: Dict[str, Any]) -> str:
     """
     Builds a complete, bilingual, grandparent-friendly card with technical
     breakdown and reverse search provenance for Telegram.
+    Supports Text, Image, Audio, and Video (Deepfake).
     """
     verdict = result.get("verdict", "UNVERIFIABLE")
     confidence = float(result.get("confidence", 0.0) or 0.0)
+    meta = result.get("meta") or {}
+    media_type = str(result.get("type") or meta.get("type") or "text").lower()
 
     # 1. 2-line explanations in English and Hindi
     exp_en = _clean_text(result.get("explanation_en") or "")
@@ -80,7 +91,7 @@ def format_verdict(result: Dict[str, Any]) -> str:
         exp_en = _clean_text(raw_exp)
 
     emoji = verdict_emoji(verdict)
-    title = verdict_title_bilingual(verdict)
+    title = verdict_title_bilingual(verdict, media_type=media_type)
     percentage = round(confidence * 100, 1)
     bar = confidence_bar(confidence)
     badge = _confidence_badge(confidence)
@@ -100,7 +111,12 @@ def format_verdict(result: Dict[str, Any]) -> str:
             for p in ["no visible text", "no text provided", "no factual claim", "there is no visible"]
         )
         if not is_filler:
-            label = "🎙️ <b>Spoken claim:</b>" if result.get("type") == "voice" else "📝 <b>Claim checked:</b>"
+            if media_type == "voice":
+                label = "🎙️ <b>Spoken claim:</b>"
+            elif media_type == "video":
+                label = "🎬 <b>Video claim / speech:</b>"
+            else:
+                label = "📝 <b>Claim checked:</b>"
             claim_block = f"{label} <i>\"{claim_text[:250]}\"</i>\n\n"
 
     # 3. Bilingual 2-Line Simple Explanation (Grandparent Friendly)
@@ -125,10 +141,10 @@ def format_verdict(result: Dict[str, Any]) -> str:
         n_matches = prov.get("n_matches") or prov.get("n_matches_total") or 0
         matches = prov.get("matches") or prov.get("reverse_matches") or []
 
-        prov_lines = ["🔍 <b>Reverse Image Search & Provenance:</b>"]
+        prov_lines = ["🔍 <b>Reverse Provenance Search:</b>"]
         if prov_status:
             prov_status_clean = prov_status.replace("_", " ").title()
-            prov_lines.append(f"• <b>Image Status:</b> {prov_status_clean}")
+            prov_lines.append(f"• <b>Media Status:</b> {prov_status_clean}")
         if earliest_date:
             prov_lines.append(f"• <b>Earliest online appearance:</b> {earliest_date}")
         if n_matches > 0:
@@ -153,17 +169,27 @@ def format_verdict(result: Dict[str, Any]) -> str:
         provenance_section = "\n".join(prov_lines) + "\n\n"
 
     # 5. Technical Details Section (in English)
-    meta = result.get("meta") or {}
-    ai_score = result.get("image_ai_score") or meta.get("image_ai_score")
+    ai_score = result.get("image_ai_score") or meta.get("image_ai_score") or result.get("video_deepfake_score")
     latency_ms = meta.get("latency_ms") or result.get("latency_ms") or 0
     language = meta.get("language") or result.get("language") or ""
     image_flags = result.get("image_flags") or []
+    frames_analyzed = result.get("frames_analyzed") or meta.get("frames_analyzed")
 
     tech_lines = ["⚙️ <b>Technical Analysis Details:</b>"]
-    if ai_score is not None and (result.get("type") in ("image", "mixed") or meta.get("type") in ("image", "mixed")):
-        tech_lines.append(f"• <b>AI Generation Probability:</b> {float(ai_score) * 100:.1f}% (SDXL/ViT Classifier)")
-    if image_flags:
-        tech_lines.append(f"• <b>Forensics:</b> {', '.join(image_flags)}")
+    if media_type == "video":
+        tech_lines.append("• <b>Input Type:</b> Video (Multi-frame Temporal Forensics)")
+        if frames_analyzed:
+            tech_lines.append(f"• <b>Keyframes Analyzed:</b> {frames_analyzed} frames across timeline")
+        if ai_score is not None:
+            tech_lines.append(f"• <b>Visual Deepfake Probability:</b> {float(ai_score) * 100:.1f}% (Face-Swap / Diffusion Classifier)")
+    elif media_type in ("image", "mixed"):
+        if ai_score is not None:
+            tech_lines.append(f"• <b>AI Generation Probability:</b> {float(ai_score) * 100:.1f}% (SDXL/ViT Classifier)")
+        if image_flags:
+            tech_lines.append(f"• <b>Forensics:</b> {', '.join(image_flags)}")
+    elif media_type == "voice":
+        tech_lines.append("• <b>Input Type:</b> Spoken Audio (Whisper ASR + Fact-Check)")
+
     if language:
         tech_lines.append(f"• <b>Detected Language:</b> {language}")
     tech_lines.append(f"• <b>Certainty Level:</b> {badge} ({percentage}%)")
