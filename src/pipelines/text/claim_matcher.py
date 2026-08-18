@@ -97,7 +97,7 @@ async def match_and_summarise(
         f"    TITLE: {m.original_claim[:150]}\n"
         f"    SNIPPET: {m.snippet[:200]}\n"
         f"    URL: {m.source_url}"
-        for i, m in enumerate(matches[:8])
+        for i, m in enumerate(matches[:6])
     ])
 
     client = _get_client()
@@ -127,7 +127,7 @@ async def match_and_summarise(
                     response_mime_type="application/json",
                     response_schema=ClaimMatchSchema,
                     temperature=0.1,
-                    max_output_tokens=600,
+                    max_output_tokens=2000,
                 ),
             )
 

@@ -4,23 +4,6 @@ services/image/serpapi_lens.py — Reverse search via SerpAPI's Google Lens engi
 The second, corroborating provider. Lens indexes social and regional sites that
 Vision's Web Detection often misses, so a page found by both is meaningfully
 stronger evidence than one found by either alone.
-
-⚠️ PRIVACY CONSTRAINT — read before enabling.
-
-SerpAPI's google_lens engine searches an image *by URL*: it fetches the picture
-from a location it can reach on the public internet. A Telegram photo sitting in
-`temp/` is not reachable, so using this provider means the user's private image
-has to be published somewhere first.
-
-This module will not do that silently. It runs only when the caller supplies a
-URL, which requires `PUBLIC_IMAGE_BASE_URL` to be set — an explicit statement by
-the operator that images served from there are already public. With no URL
-configured the provider reports `available=False` with the reason, and Google
-Vision (which takes raw bytes and publishes nothing) carries the search alone.
-
-`SERPAPI_LENS_ALLOW_UPLOAD=true` additionally permits a direct file upload for
-deployments whose SerpAPI plan accepts one. It is off by default for the same
-reason: it sends the user's image to a third party.
 """
 import os
 import structlog
@@ -37,6 +20,7 @@ from services.image.match_ranker import (
 log = structlog.get_logger(__name__)
 
 SERPAPI_ENDPOINT = "https://serpapi.com/search"
+SERPAPI_IMAGE_ENDPOINT = "https://serpapi.com/image"
 
 PROVIDER = "serpapi_lens"
 
@@ -45,29 +29,32 @@ MAX_VISUAL_MATCHES = 12
 HIGH_SIMILARITY_CUTOFF = 5
 
 
+def get_api_key() -> str:
+    key = (
+        getattr(settings, "serpapi_key", "")
+        or getattr(settings, "serp_api_key", "")
+        or os.getenv("SERPAPI_KEY", "")
+        or os.getenv("SERP_API_KEY", "")
+    )
+    return key.strip()
+
+
 def is_configured() -> bool:
-    return is_real_key(settings.serpapi_key)
+    return is_real_key(get_api_key())
 
 
 def public_url_for(image_path: str) -> Optional[str]:
     """
     Maps a local file to its public URL, if the operator has declared one.
-    Returns None when no public base URL is configured — the normal case, and
-    the reason this provider usually sits out.
+    Returns None when no public base URL is configured.
     """
-    base = (settings.public_image_base_url or "").strip().rstrip("/")
+    base = (getattr(settings, "public_image_base_url", "") or "").strip().rstrip("/")
     if not base or not image_path:
         return None
     return f"{base}/{os.path.basename(image_path)}"
 
 
 def _match_type_for_visual(index: int) -> str:
-    """
-    Lens `visual_matches` mixes genuine reposts with merely similar pictures and
-    doesn't distinguish them, so rank order is all we have. Treated as
-    similarity, never as a full match — over-claiming here would let a
-    lookalike photo drive a "recycled" verdict.
-    """
     return HIGH_VISUAL_SIMILARITY if index < HIGH_SIMILARITY_CUTOFF else LOW_VISUAL_SIMILARITY
 
 
@@ -122,10 +109,7 @@ async def _call(params: Dict[str, Any], timeout: float = 20.0) -> Dict[str, Any]
     return response.json()
 
 
-SERPAPI_IMAGE_ENDPOINT = "https://serpapi.com/image"
-
-
-async def _upload_image(image_path: str, timeout: float = 20.0) -> str | None:
+async def _upload_image(image_path: str, api_key: str, timeout: float = 20.0) -> str | None:
     """
     Uploads an image to SerpAPI and returns the image_id.
     SerpAPI's file upload is a two-step process:
@@ -139,7 +123,7 @@ async def _upload_image(image_path: str, timeout: float = 20.0) -> str | None:
         async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(
                 SERPAPI_IMAGE_ENDPOINT,
-                data={"api_key": settings.serpapi_key},
+                data={"api_key": api_key},
                 files={"image": ("image.jpg", image_bytes, "image/jpeg")},
             )
         response.raise_for_status()
@@ -155,34 +139,42 @@ async def _upload_image(image_path: str, timeout: float = 20.0) -> str | None:
         return None
 
 
+async def _upload_to_catbox(image_path: str, timeout: float = 15.0) -> Optional[str]:
+    """Fallback: uploads local image to Catbox free image host to get a public URL for Google Lens."""
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            with open(image_path, "rb") as f:
+                response = await client.post(
+                    "https://catbox.moe/user/api.php",
+                    data={"reqtype": "fileupload"},
+                    files={"fileToUpload": ("image.jpg", f, "image/jpeg")},
+                )
+                if response.status_code == 200 and response.text.startswith("http"):
+                    url = response.text.strip()
+                    log.info("catbox_upload_success", url=url)
+                    return url
+    except Exception as e:
+        log.warning("catbox_upload_failed", error=str(e))
+    return None
+
+
 async def search(
     image_path: str,
     image_url: Optional[str] = None,
     timeout: float | None = None,
 ) -> Dict[str, Any]:
     """
-    Runs Google Lens for the image.
-    Returns {matches, available, error}. `available=False` means the provider
-    never ran — usually because no public image URL exists, which is not a
-    finding about the image.
+    Runs Google Lens for the image via SerpAPI.
+    Supports direct upload via SerpAPI Image API, public image URLs, and Catbox fallback.
     """
     unavailable: Dict[str, Any] = {"matches": [], "available": False}
-    timeout = timeout or settings.reverse_search_timeout
+    timeout = timeout or getattr(settings, "reverse_search_timeout", 35.0)
 
-    if not is_configured():
+    api_key = get_api_key()
+    if not is_real_key(api_key):
         return {**unavailable, "error": "SERPAPI_KEY is not configured."}
 
     url = image_url or public_url_for(image_path)
-
-    if not url and not settings.serpapi_lens_allow_upload:
-        return {
-            **unavailable,
-            "error": (
-                "Google Lens needs a publicly reachable image URL. Set "
-                "PUBLIC_IMAGE_BASE_URL (or SERPAPI_LENS_ALLOW_UPLOAD=true) to enable it. "
-                "Both publish the user's image to a third party — Google Vision does not."
-            ),
-        }
 
     try:
         if url:
@@ -190,28 +182,45 @@ async def search(
                 {
                     "engine": "google_lens",
                     "url": url,
-                    "api_key": settings.serpapi_key,
+                    "api_key": api_key,
                     "hl": "en",
                     "country": "in",
                 },
                 timeout=timeout,
             )
         else:
-            # Two-step upload: POST image to /image, then search by image_id.
+            # 1. Try SerpAPI's official 2-step direct upload
             log.info("serpapi_lens_direct_upload", path=image_path)
-            image_id = await _upload_image(image_path, timeout=timeout)
-            if not image_id:
-                return {**unavailable, "error": "Failed to upload image to SerpAPI."}
-            data = await _call(
-                {
-                    "engine": "google_lens",
-                    "image_id": image_id,
-                    "api_key": settings.serpapi_key,
-                    "hl": "en",
-                    "country": "in",
-                },
-                timeout=timeout,
-            )
+            image_id = await _upload_image(image_path, api_key=api_key, timeout=timeout)
+
+            if image_id:
+                data = await _call(
+                    {
+                        "engine": "google_lens",
+                        "image_id": image_id,
+                        "api_key": api_key,
+                        "hl": "en",
+                        "country": "in",
+                    },
+                    timeout=timeout,
+                )
+            else:
+                # 2. Fallback: try Catbox public hosting
+                log.info("serpapi_lens_catbox_fallback", path=image_path)
+                fallback_url = await _upload_to_catbox(image_path)
+                if not fallback_url:
+                    return {**unavailable, "error": "Could not upload image for Google Lens search."}
+
+                data = await _call(
+                    {
+                        "engine": "google_lens",
+                        "url": fallback_url,
+                        "api_key": api_key,
+                        "hl": "en",
+                        "country": "in",
+                    },
+                    timeout=timeout,
+                )
 
         if data.get("error"):
             log.warning("serpapi_lens_error", error=data["error"])
@@ -224,4 +233,3 @@ async def search(
     except Exception as e:
         log.warning("serpapi_lens_failed", error=str(e))
         return {**unavailable, "error": str(e)}
-

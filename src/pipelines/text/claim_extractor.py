@@ -66,7 +66,7 @@ async def extract_claim(text: str) -> Dict[str, Any]:
                     response_mime_type="application/json",
                     response_schema=ClaimExtractionSchema,
                     temperature=0.1,
-                    max_output_tokens=600,
+                    max_output_tokens=1500,
                 ),
             )
 
