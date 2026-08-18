@@ -434,16 +434,27 @@ async def check_voice(audio_path: str, progress_callback=None):
     stt = await transcribe_audio(audio_path)
 
     if not stt.get("success") or not stt.get("text"):
+        raw_err = str(stt.get("error") or "")
+        if "429" in raw_err or "RESOURCE_EXHAUSTED" in raw_err:
+            err_msg = (
+                "⚠️ <b>Gemini Free Quota Limit Reached</b>\n\n"
+                "The free tier daily limit for the primary AI model was reached. "
+                "The system automatically cycled to fallback models. Please wait 30 seconds and retry, "
+                "or paste your claim as text."
+            )
+        else:
+            err_msg = (
+                "<b>Could not transcribe this voice note.</b>\n\n"
+                f"{raw_err or 'No intelligible speech was found.'}\n\n"
+                "Try a clearer recording, or paste the claim as text instead."
+            )
+
         return {
             "type": "voice",
             "verdict": "UNVERIFIABLE",
             "confidence": 0.0,
             "transcript": "",
-            "explanation": (
-                "<b>Could not transcribe this voice note.</b>\n\n"
-                f"{stt.get('error') or 'No intelligible speech was found.'}\n\n"
-                "Try a clearer recording, or paste the claim as text instead."
-            ),
+            "explanation": err_msg,
             "sources": []
         }
 

@@ -109,7 +109,7 @@ async def _call(params: Dict[str, Any], timeout: float = 20.0) -> Dict[str, Any]
     return response.json()
 
 
-async def _upload_image(image_path: str, api_key: str, timeout: float = 20.0) -> str | None:
+async def _upload_image(image_path: str, api_key: str, timeout: float = 20.0) -> Optional[str]:
     """
     Uploads an image to SerpAPI and returns the image_id.
     SerpAPI's file upload is a two-step process:
@@ -129,14 +129,12 @@ async def _upload_image(image_path: str, api_key: str, timeout: float = 20.0) ->
         response.raise_for_status()
         data = response.json()
         image_id = data.get("image_id")
-        if not image_id:
-            log.warning("serpapi_upload_no_id", response=data)
-            return None
-        log.info("serpapi_image_uploaded", image_id=image_id)
-        return image_id
+        if image_id:
+            log.info("serpapi_image_uploaded", image_id=image_id)
+            return image_id
     except Exception as e:
         log.warning("serpapi_upload_failed", error=str(e))
-        return None
+    return None
 
 
 async def _upload_to_catbox(image_path: str, timeout: float = 15.0) -> Optional[str]:
@@ -165,7 +163,7 @@ async def search(
 ) -> Dict[str, Any]:
     """
     Runs Google Lens for the image via SerpAPI.
-    Supports direct upload via SerpAPI Image API, public image URLs, and Catbox fallback.
+    Supports public URL, SerpAPI official /image upload, and Catbox fallback.
     """
     unavailable: Dict[str, Any] = {"matches": [], "available": False}
     timeout = timeout or getattr(settings, "reverse_search_timeout", 35.0)
@@ -175,6 +173,7 @@ async def search(
         return {**unavailable, "error": "SERPAPI_KEY is not configured."}
 
     url = image_url or public_url_for(image_path)
+    data = None
 
     try:
         if url:
@@ -192,7 +191,6 @@ async def search(
             # 1. Try SerpAPI's official 2-step direct upload
             log.info("serpapi_lens_direct_upload", path=image_path)
             image_id = await _upload_image(image_path, api_key=api_key, timeout=timeout)
-
             if image_id:
                 data = await _call(
                     {
@@ -204,23 +202,25 @@ async def search(
                     },
                     timeout=timeout,
                 )
-            else:
-                # 2. Fallback: try Catbox public hosting
-                log.info("serpapi_lens_catbox_fallback", path=image_path)
-                fallback_url = await _upload_to_catbox(image_path)
-                if not fallback_url:
-                    return {**unavailable, "error": "Could not upload image for Google Lens search."}
 
-                data = await _call(
-                    {
-                        "engine": "google_lens",
-                        "url": fallback_url,
-                        "api_key": api_key,
-                        "hl": "en",
-                        "country": "in",
-                    },
-                    timeout=timeout,
-                )
+            # 2. Fallback: try Catbox public hosting
+            if not data or data.get("error"):
+                log.info("serpapi_lens_catbox_fallback", path=image_path)
+                catbox_url = await _upload_to_catbox(image_path, timeout=timeout)
+                if catbox_url:
+                    data = await _call(
+                        {
+                            "engine": "google_lens",
+                            "url": catbox_url,
+                            "api_key": api_key,
+                            "hl": "en",
+                            "country": "in",
+                        },
+                        timeout=timeout,
+                    )
+
+        if not data:
+            return {**unavailable, "error": "Could not upload image or retrieve Google Lens results."}
 
         if data.get("error"):
             log.warning("serpapi_lens_error", error=data["error"])
