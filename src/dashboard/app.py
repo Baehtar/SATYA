@@ -14,7 +14,7 @@ from fastapi import APIRouter, FastAPI
 from fastapi.responses import FileResponse
 from sqlalchemy import func, select
 
-from src.db.database import AsyncSessionLocal
+from src.db.database import AsyncSessionLocal, init_db
 from src.db.models import ForwardCheck
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -27,6 +27,7 @@ router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 async def dashboard_page() -> FileResponse:
     """The dashboard single-page app."""
     return FileResponse(INDEX_HTML)
+
 
 
 @router.get("/stats")
@@ -96,5 +97,13 @@ async def get_trends():
 
 # Standalone mode: same router, same page, on its own port.
 app = FastAPI(title="Satya Trend Dashboard", version="1.0")
+
+
+@app.on_event("startup")
+async def on_startup():
+    await init_db()
+
+
 app.include_router(router)
 app.add_api_route("/", dashboard_page, methods=["GET"], include_in_schema=False)
+

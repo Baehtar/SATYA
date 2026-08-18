@@ -2,6 +2,7 @@ import os
 import time
 import uuid
 
+
 from services.ml_service import (
     check_text,
     check_image,
@@ -49,6 +50,11 @@ TREND_MESSAGE_TYPES = {
     MessageType.IMAGE_WITH_CAPTION: "image_caption",
     MessageType.VOICE: "voice",
 }
+
+
+async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Global error handler for catching network timeouts and polling drops."""
+    print(f"⚠️ Telegram Network Notice: {context.error}")
 
 
 async def start(
@@ -395,15 +401,8 @@ def register_handlers(application):
         )
     )
 
-    from telegram.ext import CallbackQueryHandler
-
     application.add_handler(
         CallbackQueryHandler(
             button_handler
         )
     )
-
-
-async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Global error handler for catching network timeouts and polling drops."""
-    print(f"⚠️ Telegram Network Notice: {context.error}")
