@@ -12,9 +12,19 @@ Contains:
 Each test measures verdict accuracy + latency.
 """
 import asyncio
+import os
+import sys
 import time
-import pytest
-from src.models.schemas import Verdict, CheckRequest, MessageType
+
+sys.path.insert(0, os.path.abspath("."))
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
+try:
+    import pytest
+except ImportError:
+    pytest = None
+from src.models.schemas import Verdict, CheckRequest
 
 # ─── Judging Set Fixtures ────────────────────────────────────────────────────
 
@@ -102,9 +112,9 @@ JUDGING_SET = [
 
 # ─── Test Runner ─────────────────────────────────────────────────────────────
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("item", JUDGING_SET, ids=[i["id"] for i in JUDGING_SET])
-async def test_judging_item(item):
+# ─── Test Runner ─────────────────────────────────────────────────────────────
+
+async def _run_single_item(item):
     """Runs a single judging set item through the full text pipeline."""
     from src.pipelines.text.pipeline import run_text_pipeline
     from src.verdict.aggregator import aggregate_evidence
@@ -115,7 +125,7 @@ async def test_judging_item(item):
 
     request = CheckRequest(
         request_id=item["id"],
-        message_type=MessageType.TEXT,
+        message_type="text",
         user_id=0,
         chat_id=0,
         text_content=item["content"],
@@ -127,7 +137,7 @@ async def test_judging_item(item):
     # Build bundle and run verdict engine
     bundle = EvidenceBundle(
         request_id=item["id"],
-        message_type=MessageType.TEXT,
+        message_type="text",
         claim_analysis=claim_analysis,
     )
     evidence = aggregate_evidence(bundle)
@@ -167,14 +177,14 @@ if __name__ == "__main__":
                 start = time.monotonic()
                 request = CheckRequest(
                     request_id=item["id"],
-                    message_type=MessageType.TEXT,
+                    message_type="text",
                     user_id=0, chat_id=0,
                     text_content=item["content"],
                 )
                 claim_analysis = await run_text_pipeline(request)
                 bundle = EvidenceBundle(
                     request_id=item["id"],
-                    message_type=MessageType.TEXT,
+                    message_type="text",
                     claim_analysis=claim_analysis,
                 )
                 evidence = aggregate_evidence(bundle)

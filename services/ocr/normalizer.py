@@ -75,12 +75,25 @@ def normalize_ocr_result(raw_text: str) -> Dict[str, Any]:
 
     has_readable_text = len(normalized) >= 10
 
+    # Filter out generic filler phrases when no text is found in image
+    filler_patterns = [
+        r"no (visible )?text",
+        r"no (factual )?claim",
+        r"no text provided",
+        r"no text found",
+        r"no headline",
+        r"there is no"
+    ]
+    if any(re.search(pat, cleaned, re.IGNORECASE) for pat in filler_patterns) and len(cleaned) < 80:
+        has_readable_text = False
+
     log.info(
         "ocr_normalized",
         lang=lang.value,
         script=script,
         raw_len=len(raw_text),
-        clean_len=len(cleaned)
+        clean_len=len(cleaned),
+        has_readable_text=has_readable_text
     )
 
     return {

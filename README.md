@@ -351,10 +351,62 @@ See `docs/blind_spots.md` for the full list. Key ones:
 
 ## Latency Targets (GPU)
 
-| Forward Type | Target |
-|---|---|
-| Text only | 5–10s |
-| Image only | 8–20s |
-| Image + caption | 10–25s |
-| Voice note | 12–25s |
 | News screenshot | 8–18s |
+
+---
+
+## Audio-to-Fake-News Verification Workflow (Whisper Large-v3 Turbo)
+
+Satya features an end-to-end **Audio / Voice Note → Whisper ASR → Multilingual Transcript → Claim Extraction → Fact Check Retrieval → NLI Evidence Verification → Telegram Verdict Card** pipeline.
+
+```
+Telegram Audio / Voice Note
+            ↓
+Download Telegram File (OGG/Opus, MP3, WAV, M4A)
+            ↓
+Audio Preprocessor (FFmpeg / Format Validation)
+            ↓
+Hugging Face Whisper Large-v3-Turbo (openai/whisper-large-v3-turbo)
+            ↓
+Spoken Language Transcript (Preserves original language & script)
+            ↓
+Gemini Claim Extraction & Language Normalization
+            ↓
+Parallel Fact-Check Search (PIB, Alt News, BOOM, Google FactCheck API)
+            ↓
+Multilingual NLI Reasoning (ENTAILMENT | CONTRADICTION | NEUTRAL)
+            ↓
+Evidence Aggregation & Confidence Engine
+            ↓
+Telegram Verdict Card (Verdict + Bar + Transcript + Claim + Explanation + Sources)
+```
+
+### Key Technical Details & Setup
+
+1. **Whisper Model**:
+   - Model: `openai/whisper-large-v3-turbo`
+   - Inference: Local Hugging Face Transformers pipeline (`pipeline("automatic-speech-recognition", model="openai/whisper-large-v3-turbo")`).
+   - Reused Singleton: Model is loaded once on startup/first call and reused across all audio messages.
+   - SHA-256 Audio Hash Cache: Identical audio files skip inference and return cached transcriptions instantly.
+
+2. **GPU & CPU Hardware Handling**:
+   - GPU (CUDA): Uses `torch.float16` and device `cuda:0` when CUDA is available.
+   - CPU Fallback: Falls back gracefully to `torch.float32` and CPU when CUDA is unavailable.
+
+3. **Hugging Face Authentication**:
+   - Optional environment variable: `HF_TOKEN=your_token_here` in `.env`.
+   - Never hardcoded or logged.
+
+4. **FFmpeg & Audio Format Support**:
+   - Handles Telegram voice notes (OGG/Opus) and uploaded audio files (MP3, WAV, M4A, AAC, FLAC).
+   - If FFmpeg is installed on the system, preprocesses audio into 16kHz mono PCM WAV for optimal transcription.
+   - Temporary converted audio files are cleaned up safely in `finally` blocks.
+
+5. **Supported Spoken Languages**:
+   - English, Hindi (Devanagari & Hinglish), Tamil (Tamil script & Tanglish), Bengali, Telugu, mixed-language speech.
+   - Speech-to-text retains spoken language without forcing translation to English during ASR.
+
+6. **Running Audio Pipeline Unit & E2E Tests**:
+   ```bash
+   python -m unittest tests/test_audio_pipeline.py
+   ```

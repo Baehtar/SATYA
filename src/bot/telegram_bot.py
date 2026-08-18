@@ -35,6 +35,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "<i>Verify written news claims, viral messages, or news text extracted from images.</i>\n\n"
         "2️⃣ <b>Fake AI Image Detection</b>\n"
         "<i>Detect if an image is AI-generated (SDXL/Midjourney/DALL-E) or authentic.</i>\n\n"
+        "3️⃣ <b>Verify Audio / Voice Note</b>\n"
+        "<i>Transcribe audio voice notes (Whisper AI) & fact-check extracted spoken news claims.</i>\n\n"
         "👇 <b>Select an option below or send your content directly:</b>"
     )
 
@@ -49,6 +51,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             InlineKeyboardButton(
                 "🤖 2. Fake AI Image Detection",
                 callback_data="mode_ai_image"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🎤 3. Verify Audio / Voice Note",
+                callback_data="mode_audio"
             )
         ]
     ]
