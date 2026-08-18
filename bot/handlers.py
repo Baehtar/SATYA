@@ -1,4 +1,6 @@
 import os
+import time
+import uuid
 
 from services.ml_service import (
     check_text,
@@ -31,6 +33,22 @@ from utils.telegram_files import (
     download_photo,
     download_voice
 )
+
+# Bot checks feed the same trend dashboard the web portal does (/dashboard).
+try:
+    from src.db.trend_log import log_result
+    TREND_LOGGING = True
+except ImportError:      # DB stack not installed — the bot still answers.
+    TREND_LOGGING = False
+
+
+# The dashboard groups checks by input type; these are the labels it shows.
+TREND_MESSAGE_TYPES = {
+    MessageType.TEXT: "text",
+    MessageType.IMAGE: "image",
+    MessageType.IMAGE_WITH_CAPTION: "image_caption",
+    MessageType.VOICE: "voice",
+}
 
 
 async def start(
@@ -98,6 +116,33 @@ async def help_command(
     )
 
 
+async def _log_to_dashboard(
+    result: dict,
+    request_id: str,
+    message_type,
+    latency_ms: int,
+    user_id: int,
+    mode: str = None
+):
+    """Records the check on the trend dashboard (/dashboard on the web portal).
+
+    The bot's "audio" mode is a routing choice, not a verdict mode — only the
+    dedicated AI-image check changes how a result is read, so anything else is
+    logged as an ordinary claim check.
+    """
+    if not TREND_LOGGING:
+        return
+
+    await log_result(
+        result,
+        request_id=request_id,
+        message_type=TREND_MESSAGE_TYPES.get(message_type, "text"),
+        latency_ms=latency_ms,
+        user_id=user_id,
+        mode="ai_image" if mode == "ai_image" else "fake_news"
+    )
+
+
 async def handle_message(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
@@ -126,6 +171,9 @@ async def handle_message(
         "I'm analysing the forwarded content.",
         parse_mode="HTML"
     )
+
+    request_id = str(uuid.uuid4())
+    started_at = time.monotonic()
 
     try:
 
@@ -220,6 +268,19 @@ async def handle_message(
                 "confidence": 0.0,
                 "explanation": "Unsupported input."
             }
+
+        # -----------------------------
+        # LOG TO THE TREND DASHBOARD
+        # -----------------------------
+
+        await _log_to_dashboard(
+            result,
+            request_id=request_id,
+            message_type=message_type,
+            latency_ms=int((time.monotonic() - started_at) * 1000),
+            user_id=update.effective_user.id if update.effective_user else 0,
+            mode=context.user_data.get("selected_mode")
+        )
 
         # -----------------------------
         # FORMAT RESULT
@@ -345,4 +406,4 @@ def register_handlers(application):
 
 async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Global error handler for catching network timeouts and polling drops."""
-    print(f"⚠️ Telegram Network Notice: {context.error}")
+    print(f"⚠️ Telegram Network Notice: {context.error}")

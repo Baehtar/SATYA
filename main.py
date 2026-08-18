@@ -9,7 +9,7 @@ def main():
     print("🤖 Satya is running!")
     print("Press Ctrl+C to stop.")
 
-    application.run_polling()
+    application.run_polling(bootstrap_retries=-1)
 
 
 if __name__ == "__main__":

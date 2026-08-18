@@ -98,7 +98,22 @@ The web UI is a second front-end over the **same** analysis code the bot uses
 bilingual verdict card. `GET /api/health` reports which API keys are configured,
 which is the quickest way to see why a result came back degraded.
 
-### 7. Run the trend dashboard (optional)
+### 7. The trend dashboard
+The trend dashboard is part of the same portal — no second service to start:
+
+```bash
+python -m UI.run
+# Open http://localhost:8000/dashboard   (or the "Trends" link in the nav)
+```
+
+It reads `ForwardCheck` rows from the database (`DATABASE_URL`). **Both front-ends
+feed it** — every check run through the web portal *and* every check the Telegram
+bot answers is logged via `src/db/trend_log.py`, which normalises the verdict the
+same way for both, so bot and portal traffic are directly comparable in the stats,
+charts and live feed. Its API lives under `/api/dashboard/{stats,recent,trends}`.
+
+It can still be run on its own port if you want it separate:
+
 ```bash
 uvicorn src.dashboard.app:app --port 8080 --reload
 # Open http://localhost:8080
@@ -141,7 +156,7 @@ satya/
 │   │   ├── models.py                # SQLModel tables
 │   │   └── database.py              # Async session management
 │   └── dashboard/
-│       ├── app.py                   # FastAPI trend dashboard API
+│       ├── app.py                   # Trend dashboard router (mounted into the web portal)
 │       └── static/index.html        # Dashboard frontend
 ├── bot/                             # The running Telegram bot (entry: main.py)
 │   ├── handlers.py                  # Commands, menu, message handling

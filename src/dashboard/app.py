@@ -1,29 +1,35 @@
 """
-src/dashboard/app.py — Trend dashboard FastAPI app.
+src/dashboard/app.py — Trend dashboard.
 Owned by: Person 4
 
-Serves trend data and a simple dashboard frontend.
-Run with: uvicorn src.dashboard.app:app --port 8080
+The dashboard is an APIRouter plus one HTML page, so it can be mounted into the
+Satya web portal (UI/src/server.py) instead of running as a second service.
+`app` is kept for running it on its own:
+
+    uvicorn src.dashboard.app:app --port 8080
 """
-from fastapi import FastAPI
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse
-from sqlalchemy import select, func, text
+from pathlib import Path
+
+from fastapi import APIRouter, FastAPI
+from fastapi.responses import FileResponse
+from sqlalchemy import func, select
+
 from src.db.database import AsyncSessionLocal
 from src.db.models import ForwardCheck
-import json
 
-app = FastAPI(title="Satya Trend Dashboard", version="1.0")
-app.mount("/static", StaticFiles(directory="src/dashboard/static"), name="static")
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+INDEX_HTML = STATIC_DIR / "index.html"
 
-
-@app.get("/", response_class=HTMLResponse)
-async def dashboard():
-    with open("src/dashboard/static/index.html") as f:
-        return f.read()
+# Mounted by the portal under /api/dashboard — the page fetches those paths.
+router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
 
-@app.get("/api/stats")
+async def dashboard_page() -> FileResponse:
+    """The dashboard single-page app."""
+    return FileResponse(INDEX_HTML)
+
+
+@router.get("/stats")
 async def get_stats():
     """Summary stats for the dashboard header."""
     async with AsyncSessionLocal() as session:
@@ -44,7 +50,7 @@ async def get_stats():
     }
 
 
-@app.get("/api/recent")
+@router.get("/recent")
 async def get_recent(limit: int = 20):
     """Most recent checks for the live feed."""
     async with AsyncSessionLocal() as session:
@@ -69,7 +75,7 @@ async def get_recent(limit: int = 20):
     ]
 
 
-@app.get("/api/trends")
+@router.get("/trends")
 async def get_trends():
     """Verdict distribution and claim type breakdown for charts."""
     async with AsyncSessionLocal() as session:
@@ -86,3 +92,9 @@ async def get_trends():
         "verdict_distribution": dict(verdict_dist.all()),
         "claim_type_distribution": dict(claim_dist.all()),
     }
+
+
+# Standalone mode: same router, same page, on its own port.
+app = FastAPI(title="Satya Trend Dashboard", version="1.0")
+app.include_router(router)
+app.add_api_route("/", dashboard_page, methods=["GET"], include_in_schema=False)

@@ -14,6 +14,8 @@ Endpoints:
     GET  /api/health              → liveness + which API keys are configured
     POST /api/check               → multipart {text?, image?, audio?} → {"id": ...}
     GET  /api/check/{id}/stream   → SSE: progress* → (verdict | failed) → done
+    GET  /dashboard               → the misinformation trend dashboard
+    GET  /api/dashboard/*         → stats, recent checks and trends behind it
 """
 import asyncio
 import json
@@ -33,6 +35,16 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from src.config import settings
+
+# The trend dashboard needs the DB stack (sqlmodel/aiosqlite). Without it the
+# portal still checks forwards — it just cannot show or record trends.
+try:
+    from src.dashboard.app import dashboard_page, router as dashboard_router
+    from src.db.database import init_db
+    from src.db.trend_log import log_result
+    DASHBOARD_AVAILABLE = True
+except ImportError:  # pragma: no cover - depends on the install
+    DASHBOARD_AVAILABLE = False
 from services.ml_service import check_image, check_mixed, check_text, check_voice
 from services.audio.convert import extract_audio_from_video
 from UI.src.adapter import build_card
@@ -106,6 +118,13 @@ def _prune_jobs() -> None:
 @app.on_event("startup")
 async def on_startup() -> None:
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        if DASHBOARD_AVAILABLE:
+            await init_db()
+    except Exception as e:
+        # The portal still checks forwards without a database; only the trend
+        # dashboard degrades, so this must never block startup.
+        log.warning("db_init_failed", error=str(e))
     log.info(
         "satya_web_ui_started",
         frontend=str(FRONTEND_DIR),
@@ -127,6 +146,12 @@ async def index() -> FileResponse:
     return FileResponse(FRONTEND_DIR / "index.html")
 
 
+# The trend dashboard lives in the same portal: same origin, same process.
+if DASHBOARD_AVAILABLE:
+    app.include_router(dashboard_router)
+    app.add_api_route("/dashboard", dashboard_page, methods=["GET"], include_in_schema=False)
+
+
 @app.get("/api/health")
 async def health() -> Dict[str, Any]:
     """Reports which capabilities are actually usable — the fastest way to see
@@ -136,6 +161,7 @@ async def health() -> Dict[str, Any]:
     whisper_config = whisper_stt.resolve_api_config()
     return {
         "status": "ok",
+        "trend_dashboard_enabled": DASHBOARD_AVAILABLE,   # /dashboard
         "gemini_configured": bool(settings.gemini_api_key),     # OCR, claims, transcription
         "hf_configured": bool(os.getenv("HF_API_KEY", "")),     # AI-image detection
         "google_factcheck_configured": bool(settings.google_factcheck_api_key),
@@ -157,6 +183,21 @@ async def health() -> Dict[str, Any]:
 # ─────────────────────────────────────────────────────────────────────────────
 #  Analysis
 # ─────────────────────────────────────────────────────────────────────────────
+
+async def _log_check(job_id: str, result: Dict[str, Any], mode: str, latency_ms: int) -> None:
+    """Records the finished check so it shows up on the trend dashboard — through
+    the same helper the Telegram bot uses, so both land as comparable rows."""
+    if not DASHBOARD_AVAILABLE:
+        return
+    await log_result(
+        result,
+        request_id=job_id,
+        message_type=str(result.get("type") or "text"),
+        latency_ms=latency_ms,
+        user_id=0,              # the web portal has no accounts
+        mode=mode,
+    )
+
 
 async def _run_analysis(
     job_id: str,
@@ -221,6 +262,7 @@ async def _run_analysis(
         card = await build_card(result, submitted_text=text, latency_ms=latency_ms, mode=mode)
         await queue.put(("progress", {"step": "verdict", "status": "completed", "message": "Verdict ready"}))
         await queue.put(("verdict", card))
+        await _log_check(job_id, result, mode, latency_ms)
         log.info("check_complete", job_id=job_id, verdict=card["verdict"], latency_ms=latency_ms)
 
     except asyncio.TimeoutError:
