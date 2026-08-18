@@ -272,16 +272,19 @@ async def handle_message(
         # -----------------------------
         # BUILD GRANDPARENT-FRIENDLY BILINGUAL CARD
         # -----------------------------
+        latency_ms = int((time.monotonic() - started_at) * 1000)
         try:
             sub_text = message.text or message.caption or result.get("extracted_claim", "")
             card = await build_card(
                 result,
                 submitted_text=sub_text,
+                latency_ms=latency_ms,
                 mode=context.user_data.get("selected_mode", "fake_news"),
             )
         except Exception as card_err:
             print(f"Bilingual card generation fallback: {card_err}")
             card = result
+            card["latency_ms"] = latency_ms
 
         response = format_verdict(
             card

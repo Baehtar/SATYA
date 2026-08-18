@@ -1,7 +1,14 @@
 """
-bot/response.py — Grandparent-friendly, bilingual verdict card formatter for Telegram.
-Renders clean, easy-to-read verdict cards in English + Hindi/Hinglish.
+bot/response.py — Comprehensive verdict card formatter for Telegram.
+Includes:
+- Big visual emoji & bilingual verdict header
+- Grandparent-friendly 2-line explanations in English + Hindi/Hinglish
+- Reverse search & image provenance details
+- Full technical breakdown in English (AI scores, Forensics, Language, Latency)
+- Verified fact-check source links
 """
+import html
+import re
 from typing import Any, Dict, List
 
 
@@ -48,25 +55,29 @@ def _confidence_badge(confidence: float) -> str:
     return "Low"
 
 
+def _clean_text(text: str) -> str:
+    if not text:
+        return ""
+    text = re.sub(r"<[^>]+>", "", text)
+    text = html.unescape(text)
+    return text.strip()
+
+
 def format_verdict(result: Dict[str, Any]) -> str:
     """
-    Builds a clean, 2-line bilingual explanation card for Telegram users.
-    Handles both raw ml_service results and adapter card payloads.
+    Builds a complete, bilingual, grandparent-friendly card with technical
+    breakdown and reverse search provenance for Telegram.
     """
     verdict = result.get("verdict", "UNVERIFIABLE")
     confidence = float(result.get("confidence", 0.0) or 0.0)
 
-    # 2-line explanations in English and Hindi
-    exp_en = result.get("explanation_en") or ""
-    exp_hi = result.get("explanation_hi") or ""
+    # 1. 2-line explanations in English and Hindi
+    exp_en = _clean_text(result.get("explanation_en") or "")
+    exp_hi = _clean_text(result.get("explanation_hi") or "")
 
-    # Fallback to single explanation if bilingual keys not populated
     if not exp_en:
         raw_exp = result.get("explanation", "We analyzed this message against verified news and fact-check sources.")
-        # Strip internal tags if present
-        import re
-        clean_exp = re.sub(r"<[^>]+>", "", raw_exp).strip()
-        exp_en = clean_exp
+        exp_en = _clean_text(raw_exp)
 
     emoji = verdict_emoji(verdict)
     title = verdict_title_bilingual(verdict)
@@ -74,7 +85,7 @@ def format_verdict(result: Dict[str, Any]) -> str:
     bar = confidence_bar(confidence)
     badge = _confidence_badge(confidence)
 
-    # Claim or transcript line
+    # 2. Claim or transcript line
     claim_text = (
         result.get("claim")
         or result.get("extracted_claim")
@@ -84,7 +95,6 @@ def format_verdict(result: Dict[str, Any]) -> str:
 
     claim_block = ""
     if claim_text:
-        # Avoid filler text like "no visible text"
         is_filler = any(
             p in claim_text.lower()
             for p in ["no visible text", "no text provided", "no factual claim", "there is no visible"]
@@ -93,20 +103,76 @@ def format_verdict(result: Dict[str, Any]) -> str:
             label = "🎙️ <b>Spoken claim:</b>" if result.get("type") == "voice" else "📝 <b>Claim checked:</b>"
             claim_block = f"{label} <i>\"{claim_text[:250]}\"</i>\n\n"
 
-    # Bilingual 2-line explanation section
+    # 3. Bilingual 2-Line Simple Explanation (Grandparent Friendly)
     explanation_section = ""
     if exp_en and exp_hi:
         explanation_section = (
-            "🔍 <b>What this means / इसका क्या मतलब है:</b>\n\n"
+            "💡 <b>In Simple Words / सरल शब्दों में:</b>\n\n"
             f"🇬🇧 <b>English:</b>\n{exp_en}\n\n"
-            f"🇮🇳 <b>सरल हिंदी:</b>\n{exp_hi}\n"
+            f"🇮🇳 <b>सरल हिंदी:</b>\n{exp_hi}\n\n"
         )
     elif exp_en:
         explanation_section = (
-            f"🔍 <b>What we found:</b>\n{exp_en}\n"
+            f"💡 <b>In Simple Words:</b>\n{exp_en}\n\n"
         )
 
-    # Sources list
+    # 4. Reverse Search & Provenance Section
+    provenance_section = ""
+    prov = result.get("provenance")
+    if prov and isinstance(prov, dict):
+        prov_status = prov.get("status") or prov.get("image_status") or ""
+        earliest_date = prov.get("earliest_located_date") or ""
+        n_matches = prov.get("n_matches") or prov.get("n_matches_total") or 0
+        matches = prov.get("matches") or prov.get("reverse_matches") or []
+
+        prov_lines = ["🔍 <b>Reverse Image Search & Provenance:</b>"]
+        if prov_status:
+            prov_status_clean = prov_status.replace("_", " ").title()
+            prov_lines.append(f"• <b>Image Status:</b> {prov_status_clean}")
+        if earliest_date:
+            prov_lines.append(f"• <b>Earliest online appearance:</b> {earliest_date}")
+        if n_matches > 0:
+            prov_lines.append(f"• <b>Web Matches Found:</b> {n_matches} online pages indexed")
+
+        if matches:
+            seen = set()
+            top_links = []
+            for m in matches[:3]:
+                url = m.get("url") or ""
+                domain = m.get("domain") or (url.split("/")[2] if "//" in url else "web source")
+                m_title = m.get("title") or m.get("page_title") or domain
+                pub_date = m.get("published_date") or ""
+                date_str = f" ({pub_date})" if pub_date else ""
+                if url and url not in seen:
+                    seen.add(url)
+                    top_links.append(f"  └ <a href='{url}'>{domain}</a>{date_str}: {m_title[:60]}")
+
+            if top_links:
+                prov_lines.append("• <b>Prior web appearances:</b>\n" + "\n".join(top_links))
+
+        provenance_section = "\n".join(prov_lines) + "\n\n"
+
+    # 5. Technical Details Section (in English)
+    meta = result.get("meta") or {}
+    ai_score = result.get("image_ai_score") or meta.get("image_ai_score")
+    latency_ms = meta.get("latency_ms") or result.get("latency_ms") or 0
+    language = meta.get("language") or result.get("language") or ""
+    image_flags = result.get("image_flags") or []
+
+    tech_lines = ["⚙️ <b>Technical Analysis Details:</b>"]
+    if ai_score is not None and (result.get("type") in ("image", "mixed") or meta.get("type") in ("image", "mixed")):
+        tech_lines.append(f"• <b>AI Generation Probability:</b> {float(ai_score) * 100:.1f}% (SDXL/ViT Classifier)")
+    if image_flags:
+        tech_lines.append(f"• <b>Forensics:</b> {', '.join(image_flags)}")
+    if language:
+        tech_lines.append(f"• <b>Detected Language:</b> {language}")
+    tech_lines.append(f"• <b>Certainty Level:</b> {badge} ({percentage}%)")
+    if latency_ms:
+        tech_lines.append(f"• <b>Pipeline Latency:</b> {float(latency_ms)/1000:.2f}s")
+
+    tech_section = "\n".join(tech_lines) + "\n\n"
+
+    # 6. Fact-check sources list
     sources = result.get("sources", [])
     sources_text = ""
     if sources:
@@ -118,13 +184,13 @@ def format_verdict(result: Dict[str, Any]) -> str:
             if url and url not in seen_urls:
                 seen_urls.add(url)
                 sources_list.append(f"• <a href='{url}'>{name}</a>")
-                if len(sources_list) >= 3:
+                if len(sources_list) >= 4:
                     break
 
         if sources_list:
-            sources_text = "\n📎 <b>Fact-check sources:</b>\n" + "\n".join(sources_list) + "\n"
+            sources_text = "📎 <b>Fact-Check Sources:</b>\n" + "\n".join(sources_list) + "\n\n"
 
-    # Disclaimer
+    # 7. Disclaimer
     disclaimer = result.get("disclaimer") or (
         "⚠️ <i>Please verify important claims before forwarding to family & groups.</i>"
     )
@@ -135,7 +201,9 @@ def format_verdict(result: Dict[str, Any]) -> str:
         f"<b>Certainty:</b> {bar} {percentage}% ({badge})\n\n"
         f"{claim_block}"
         f"{explanation_section}"
-        f"{sources_text}\n"
+        f"{provenance_section}"
+        f"{tech_section}"
+        f"{sources_text}"
         f"{disclaimer}\n"
         "━━━━━━━━━━━━━━━━━━━━"
     )
