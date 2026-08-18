@@ -12,3 +12,10 @@ lxml>=4.9.0
 ddgs>=8.0.0
 pytesseract>=0.3.10
 easyocr>=1.7.0
+transformers>=4.36.0
+torch
+accelerate
+huggingface_hub
+librosa
+python-dateutil>=2.8.2
+numpy>=1.24.0

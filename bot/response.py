@@ -35,12 +35,15 @@ def confidence_bar(confidence):
 def format_verdict(result):
     """
     Formats structured Telegram response cards per fake_news_workflow.md Section 18.
+    Supports voice/audio transcripts & extracted claims.
     """
     verdict = result.get("verdict", "UNVERIFIABLE")
     confidence = result.get("confidence", 0.0)
     explanation = result.get("explanation", "No explanation available.")
     sources = result.get("sources", [])
     lang = result.get("language", "EN")
+    transcript = result.get("transcript", "").strip()
+    extracted_claim = result.get("extracted_claim", "").strip()
 
     emoji = verdict_emoji(verdict)
     title = verdict_title(verdict)
@@ -56,6 +59,18 @@ def format_verdict(result):
     else:
         section_heading = "🔍 <b>What we found</b>"
 
+    # Transcript block
+    transcript_block = ""
+    if transcript:
+        transcript_block = f"🎙️ <b>Transcript</b>\n<i>\"{transcript}\"</i>\n\n"
+
+    # Extracted claim block
+    claim_block = ""
+    if extracted_claim and extracted_claim != transcript:
+        is_filler = any(p in extracted_claim.lower() for p in ["no visible text", "no text provided", "no factual claim", "there is no visible"])
+        if not is_filler:
+            claim_block = f"📝 <b>Claim checked</b>\n<i>\"{extracted_claim}\"</i>\n\n"
+
     # Sources list formatting
     sources_text = ""
     if sources:
@@ -70,6 +85,8 @@ def format_verdict(result):
         "━━━━━━━━━━━━━━━━━━━━\n"
         f"{emoji} <b>{title}</b>\n\n"
         f"Confidence: {bar} {percentage}%\n\n"
+        f"{transcript_block}"
+        f"{claim_block}"
         f"{section_heading}\n"
         f"{explanation}"
         f"{sources_text}\n\n"

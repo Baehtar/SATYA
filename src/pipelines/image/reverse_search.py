@@ -19,34 +19,36 @@ log = structlog.get_logger(__name__)
 
 async def run_reverse_search(image_path: str, claimed_date: Optional[str] = None) -> dict:
     """
-    Performs reverse image search and date comparison.
-    Returns:
-      {
-        "results": List[ReverseImageResult],
-        "earliest_date": str | None,
-        "recycled": bool,
-        "recycled_confidence": float,
-      }
+    Performs reverse image search, multi-tier date extraction, and date comparison.
+    Delegates to services/image/reverse_engine.py master engine.
     """
     if not image_path:
         return {"results": [], "earliest_date": None, "recycled": False, "recycled_confidence": 0.0}
 
-    results = await _serpapi_google_lens(image_path)
-    earliest_date = _find_earliest_date(results)
-    recycled, recycled_conf = _check_recycled(earliest_date, claimed_date)
+    from services.image.reverse_engine import reverse_image_check
+    rev_data = await reverse_image_check(image_path, claimed_date=claimed_date)
 
-    log.info(
-        "reverse_search_done",
-        n_results=len(results),
-        earliest_date=earliest_date,
-        recycled=recycled,
-    )
+    # Convert matches to ReverseImageResult schemas for backward compatibility
+    schema_results = []
+    for m in rev_data.get("reverse_matches", []):
+        schema_results.append(ReverseImageResult(
+            url=m.get("url", ""),
+            title=m.get("page_title", ""),
+            snippet=m.get("match_type", ""),
+            date_published=m.get("published_date"),
+            source_domain=m.get("source_provider", "")
+        ))
+
+    date_analysis = rev_data.get("date_analysis", {})
+    recycled = rev_data.get("image_status") == "RECYCLED"
+    recycled_conf = float(date_analysis.get("recycled_confidence", 0.0))
 
     return {
-        "results": results,
-        "earliest_date": earliest_date,
+        "results": schema_results,
+        "earliest_date": rev_data.get("earliest_located_date"),
         "recycled": recycled,
         "recycled_confidence": recycled_conf,
+        "raw_engine_result": rev_data
     }
 
 

@@ -136,10 +136,19 @@ async def _build_check_request(update: Update, request_id: str) -> CheckRequest:
             else MessageType.IMAGE
         )
 
-    elif message.document and message.document.mime_type.startswith("image/"):
-        image_path = await _download_file(update, message.document.file_id, ".jpg")
-        text_content = message.caption
-        message_type = MessageType.IMAGE_WITH_CAPTION if text_content else MessageType.IMAGE
+    elif message.document:
+        mime = (message.document.mime_type or "").lower()
+        file_name = (message.document.file_name or "").lower()
+        ext = os.path.splitext(file_name)[1]
+        audio_exts = {".mp3", ".wav", ".ogg", ".m4a", ".aac", ".flac", ".opus", ".wma", ".m4r", ".mpeg", ".mp4", ".mpga", ".3gp", ".amr"}
+
+        if mime.startswith("audio/") or mime.startswith("video/") or ext in audio_exts or any(file_name.endswith(e) for e in audio_exts):
+            audio_path = await _download_file(update, message.document.file_id, ext or ".mp3")
+            message_type = MessageType.VOICE
+        else:
+            image_path = await _download_file(update, message.document.file_id, ".jpg")
+            text_content = message.caption
+            message_type = MessageType.IMAGE_WITH_CAPTION if text_content else MessageType.IMAGE
 
     elif message.voice or message.audio:
         file_id = (message.voice or message.audio).file_id

@@ -146,57 +146,110 @@ async def check_image_ai(image_path: str):
 
 async def check_image(image_path: str, progress_callback=None, mode: str = None):
     """
-    FULL TARGET FLOW with Mode Selection Support:
-    - mode="ai_image": Dedicated AI visual detector report (SDXL / Midjourney / DALL-E).
-    - mode="fake_news" / "extract_image": Dedicated OCR text extraction & news claim verification.
-    - mode=None: Full combined pipeline (AI Image Detector + OCR Claim Verification).
+    FULL TARGET FLOW with Automatic Reverse Image Search for ALL Images:
+    - Runs AI detection (SDXL / Midjourney / DALL-E).
+    - Runs Reverse Image Search & Visual Provenance (Earliest online appearance date / Recycled image detection).
+    - Runs OCR text extraction & News Claim Verification (PIB / Alt News / BOOM / Google News).
     """
     print(f"IMAGE PROCESSOR ACTIVATED (Mode={mode}): {image_path}")
 
-    # Mode 3: Dedicated AI Image Detection
-    if mode == "ai_image":
-        if progress_callback:
-            await progress_callback("🤖 Running AI Image Authenticity Detection (SDXL/Midjourney)...")
-        ai_res = await check_image_ai(image_path)
-        image_ai_score = float(ai_res.get("artificial_score", 0.0))
-
-        if progress_callback:
-            await progress_callback("✅ AI visual inspection complete.")
-
-        return {
-            "type": "image",
-            "verdict": ai_res.get("verdict", "UNVERIFIABLE"),
-            "confidence": ai_res.get("confidence", 0.0),
-            "image_ai_score": image_ai_score,
-            "explanation": f"🤖 <b>AI Image Detection Result:</b>\n\n{ai_res.get('explanation', '')}",
-            "sources": []
-        }
-
-    # Mode 1 & 2 / Combined Flow
     if progress_callback:
-        await progress_callback("🔍 Reading image & running analysis...")
+        await progress_callback("🔍 Analyzing image: AI detection, reverse search & forensics...")
 
     ai_task = check_image_ai(image_path)
+    from services.image.reverse_engine import reverse_image_check
+    rev_task = reverse_image_check(image_path)
 
     from services.ocr import extract_text_from_image, normalize_ocr_result
     ocr_raw = await extract_text_from_image(image_path)
     ocr_meta = normalize_ocr_result(ocr_raw.get("raw_text", ""))
 
-    ai_res = await ai_task
+    ai_res, rev_res = await asyncio.gather(ai_task, rev_task)
     image_ai_score = float(ai_res.get("artificial_score", 0.0))
+
+    earliest_date = rev_res.get("earliest_located_date")
+    image_status = rev_res.get("image_status")
+    forensics = rev_res.get("forensics", {})
+    gemini_info = rev_res.get("gemini_visual_info", {})
+    event_title = gemini_info.get("event_title") or ""
+    location_str = gemini_info.get("location") or ""
+
+    recycled_note = ""
+    if image_status == "RECYCLED" or gemini_info.get("is_recycled"):
+        recycled_note = (
+            f"\n\n♻️ <b>RECYCLED IMAGE DETECTED:</b>\n"
+            f"📌 Event: <b>{event_title or 'News Archive Photo'}</b>\n"
+            f"🗓️ Earliest Online Appearance: <b>{earliest_date or 'Earlier Online Archive'}</b>.\n"
+            f"⚠️ <i>This photograph was published online in the past and is being shared out of context.</i>"
+        )
+    elif earliest_date or event_title:
+        recycled_note = (
+            f"\n\n🔍 <b>IMAGE PROVENANCE LOCATED:</b>\n"
+            f"📌 Identified Event: <b>{event_title or 'Indexed News Photo'}</b>\n"
+            f"🗓️ Earliest Located Appearance: <b>{earliest_date or 'Recent'}</b>"
+        )
+
+    # Mode 2: Dedicated AI Image Detection Mode
+    if mode == "ai_image":
+        if progress_callback:
+            await progress_callback("✅ Image AI inspection & reverse provenance search complete.")
+
+        verdict = ai_res.get("verdict", "LIKELY_TRUE")
+        conf = ai_res.get("confidence", 0.85)
+
+        explanation = f"🤖 <b>AI Image Detection Result:</b>\n\n{ai_res.get('explanation', '')}{recycled_note}"
+        sources = [
+            {"name": m.get("page_title") or m.get("source_provider", "Web Match"), "url": m.get("url")}
+            for m in rev_res.get("reverse_matches", [])[:5] if m.get("url")
+        ]
+
+        return {
+            "type": "image",
+            "verdict": verdict,
+            "confidence": conf,
+            "image_ai_score": image_ai_score,
+            "explanation": explanation,
+            "sources": sources,
+            "reverse_engine": rev_res
+        }
 
     # Step 2: Check if OCR found readable text in image
     if not ocr_meta.get("has_readable_text"):
         if progress_callback:
-            await progress_callback("✅ No news text detected in image. Visual AI report ready.")
+            await progress_callback("✅ Image inspection complete.")
+
+        # If image is a real photo (not AI-generated), mark as LIKELY_TRUE for photo authenticity
+        is_ai = ai_res.get("verdict") == "LIKELY_FALSE"
+        verdict = "LIKELY_FALSE" if is_ai else "LIKELY_TRUE"
+        conf = max(ai_res.get("confidence", 0.85), rev_res.get("date_analysis", {}).get("recycled_confidence", 0.85))
+
+        sources = [
+            {"name": m.get("page_title") or m.get("source_provider", "Web Match"), "url": m.get("url")}
+            for m in rev_res.get("reverse_matches", [])[:5] if m.get("url")
+        ]
+
+        if is_ai:
+            auth_text = "🤖 <b>AI Generated Image Detected</b>"
+        else:
+            auth_text = "🟢 <b>Authentic Photo (Real Camera/News Image)</b>"
+
+        explanation = (
+            f"<b>Photo Authenticity & Provenance:</b>\n\n"
+            f"{auth_text}\n"
+            f"{ai_res.get('explanation', '')}"
+            f"{recycled_note}\n\n"
+            f"<i>Note: No headline or text claim was provided with this photo. If someone claims this photo represents a current event, note that it is from {earliest_date or 'earlier archives'}.</i>"
+        )
+
         return {
             "type": "image",
-            "verdict": ai_res.get("verdict", "UNVERIFIABLE"),
-            "confidence": ai_res.get("confidence", 0.0),
+            "verdict": verdict,
+            "confidence": conf,
             "image_ai_score": image_ai_score,
-            "explanation": f"<b>Image Authenticity:</b> {ai_res.get('explanation', '')}\n\n<i>Note: No legible news headline/text was found in this image for fact-check search.</i>",
-            "sources": [],
-            "ocr": ocr_meta
+            "explanation": explanation,
+            "sources": sources,
+            "ocr": ocr_meta,
+            "reverse_engine": rev_res
         }
 
     # Step 3: Run Text Claim Extraction & Verification Pipeline
@@ -227,28 +280,35 @@ async def check_image(image_path: str, progress_callback=None, mode: str = None)
     conf_level = fused_res.get("confidence_level", "MODERATE")
     sources = fused_res.get("sources", [])
 
+    if image_status == "RECYCLED" or gemini_info.get("is_recycled"):
+        verdict_val = "LIKELY_FALSE"
+        conf_score = max(conf_score, 0.85)
+
     # Step 5: Format Telegram Verdict Card Text
     if verdict_val == "LIKELY_FALSE":
         explanation = (
             f"<b>Claim Analysis: Likely False</b>\n\n"
             f"Extracted Claim: <i>\"{extracted_claim}\"</i>\n\n"
-            f"Evidence: Fact-checks debunk this claim.\n\n"
-            f"🖼️ <b>Image Note:</b> {fused_res.get('image_note', '')}"
+            f"Evidence: Fact-checks or image reverse search contradict this claim.{recycled_note}"
         )
     elif verdict_val == "LIKELY_TRUE":
         explanation = (
             f"<b>Claim Analysis: Likely True</b>\n\n"
             f"Extracted Claim: <i>\"{extracted_claim}\"</i>\n\n"
-            f"Evidence: Verified by news & fact-check sources.\n\n"
-            f"🖼️ <b>Image Note:</b> {fused_res.get('image_note', '')}"
+            f"Evidence: Verified by news & fact-check sources.{recycled_note}"
         )
     else:
         explanation = (
             f"<b>Claim Analysis: Unverifiable</b>\n\n"
             f"Extracted Claim: <i>\"{extracted_claim}\"</i>\n\n"
-            f"No active fake-news debunks or verifications were found in PIB, Alt News, or BOOM archives for this claim.\n\n"
-            f"🖼️ <b>Image Note:</b> {fused_res.get('image_note', '')}"
+            f"No active fake-news debunks or verifications were found in PIB, Alt News, or BOOM archives for this claim.{recycled_note}"
         )
+
+    rev_sources = [
+        {"name": m.get("page_title") or m.get("source_provider", "Web Match"), "url": m.get("url")}
+        for m in rev_res.get("reverse_matches", [])[:3] if m.get("url")
+    ]
+    all_sources = (sources or []) + [s for s in rev_sources if s not in sources]
 
     if progress_callback:
         await progress_callback("✅ Analysis complete.")
@@ -261,25 +321,113 @@ async def check_image(image_path: str, progress_callback=None, mode: str = None)
         "extracted_claim": extracted_claim,
         "explanation": explanation,
         "image_ai_score": image_ai_score,
-        "sources": sources,
-        "ocr": ocr_meta
+        "sources": all_sources,
+        "ocr": ocr_meta,
+        "reverse_engine": rev_res
     }
 
 
-async def check_voice(audio_path: str):
+async def check_voice(audio_path: str, progress_callback=None):
     """
-    Speech-to-text + claim verification for voice notes.
+    Complete AUDIO → TEXT → FAKE-NEWS VERIFICATION Pipeline:
+    1. Transcribes audio via Hugging Face Whisper Large-v3-Turbo.
+    2. Extracts structured claim and language preservation.
+    3. Passes transcript to existing multilingual text claim verification pipeline.
     """
-    print(f"VOICE SENT TO ML: {audio_path}")
-    await asyncio.sleep(1)
+    print(f"AUDIO SENT TO WHISPER & FACT-CHECK PIPELINE: {audio_path}")
 
-    return {
-        "type": "voice",
-        "verdict": "UNVERIFIABLE",
-        "confidence": 0.0,
-        "explanation": "Voice transcription pipeline is active. Transcribed claims are processed via the fake news engine.",
-        "sources": []
-    }
+    from services.audio.whisper_service import transcribe
+    from src.models.schemas import CheckRequest
+    from src.pipelines.text.pipeline import run_text_pipeline
+
+    try:
+        if progress_callback:
+            await progress_callback("🎙️ Transcribing audio...")
+
+        transcription = await transcribe(audio_path)
+        transcript_text = transcription.get("text", "").strip()
+
+        if not transcript_text:
+            return {
+                "type": "voice",
+                "verdict": "UNVERIFIABLE",
+                "confidence": 0.0,
+                "explanation": "❌ I couldn't transcribe this audio. Please try a clearer recording.",
+                "transcript": "",
+                "extracted_claim": "",
+                "sources": []
+            }
+
+        if progress_callback:
+            await progress_callback("🔎 Checking the claim...")
+
+        req = CheckRequest(
+            request_id=str(uuid.uuid4()),
+            message_type="text",
+            text_content=transcript_text
+        )
+
+        analysis = await run_text_pipeline(req)
+
+        if progress_callback:
+            await progress_callback("⚖️ Comparing evidence...")
+
+        sources = [
+            {
+                "name": m.source_name,
+                "url": m.source_url,
+                "title": m.original_claim,
+                "verdict": m.fact_check_verdict
+            }
+            for m in analysis.matches[:5] if m.source_url
+        ]
+
+        verdict_val = analysis.text_verdict.value if hasattr(analysis.text_verdict, "value") else str(analysis.text_verdict)
+        confidence_score = float(analysis.text_verdict_confidence)
+
+        if verdict_val == "LIKELY_FALSE":
+            explanation = (
+                f"Fact-checks from {', '.join([s['name'] for s in sources[:2]]) or 'authoritative sources'} "
+                f"contradict the claim extracted from this audio recording."
+            )
+        elif verdict_val == "LIKELY_TRUE":
+            explanation = "Fact-check sources confirm the validity of the claim extracted from this audio."
+        else:
+            explanation = (
+                "No active fake-news debunks or verifications were found in PIB, Alt News, or BOOM archives for the claim extracted from this audio.\n\n"
+                "ℹ️ <i>Fact-check databases focus on debunking viral rumors rather than covering standard news events.</i>"
+            )
+
+        if progress_callback:
+            await progress_callback("✅ Analysis complete")
+
+        return {
+            "type": "voice",
+            "verdict": verdict_val,
+            "confidence": confidence_score,
+            "explanation": explanation,
+            "transcript": transcript_text,
+            "extracted_claim": analysis.extracted_claim,
+            "sources": sources,
+            "language": analysis.language.value if hasattr(analysis.language, "value") else str(analysis.language),
+            "transcription_metadata": {
+                "duration_seconds": transcription.get("duration_seconds", 0.0),
+                "processing_time_seconds": transcription.get("processing_time_seconds", 0.0),
+                "device": transcription.get("device", "cpu")
+            }
+        }
+
+    except Exception as e:
+        print(f"Error in check_voice pipeline: {e}")
+        return {
+            "type": "voice",
+            "verdict": "UNVERIFIABLE",
+            "confidence": 0.0,
+            "explanation": "❌ I couldn't transcribe this audio. Please try a clearer recording.",
+            "transcript": "",
+            "extracted_claim": "",
+            "sources": []
+        }
 
 
 async def check_mixed(image_path: str, caption: str):

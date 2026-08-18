@@ -1,3 +1,5 @@
+import os
+
 from services.ml_service import (
     check_text,
     check_image,
@@ -42,7 +44,9 @@ async def start(
         "1️⃣ <b>Fake News Detection</b>\n"
         "<i>Verify written news claims, viral messages, or news text extracted from images.</i>\n\n"
         "2️⃣ <b>Fake AI Image Detection</b>\n"
-        "<i>Detect if an image is AI-generated (SDXL/Midjourney/DALL-E) or authentic.</i>\n\n"
+        "<i>Detect if an image is AI-generated (SDXL/Midjourney/DALL-E), inspect reverse search provenance & EXIF forensics.</i>\n\n"
+        "3️⃣ <b>Verify Audio / Voice Note</b>\n"
+        "<i>Transcribe audio voice notes (Whisper AI) & fact-check extracted spoken news claims.</i>\n\n"
         "👇 <b>Select an option below or send your content directly:</b>"
     )
 
@@ -58,6 +62,12 @@ async def start(
                 InlineKeyboardButton(
                     "🤖 2. Fake AI Image Detection",
                     callback_data="mode_ai_image"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "🎤 3. Verify Audio / Voice Note",
+                    callback_data="mode_audio"
                 )
             ]
         ]
@@ -77,7 +87,8 @@ async def help_command(
     help_text = (
         "📖 <b>Satya Analysis Modes Guide</b>\n\n"
         "1️⃣ <b>Fake News Detection:</b> Send written news claims, viral text, or news clipping/screenshot images to extract text & verify news claims against PIB, Alt News, BOOM & Google News.\n"
-        "2️⃣ <b>Fake AI Image Detection:</b> Send photos or images to test for synthetic/AI visual generation (SDXL/Midjourney/DALL-E).\n\n"
+        "2️⃣ <b>Fake AI Image Detection:</b> Send photos or images to test for synthetic/AI visual generation, reverse image search provenance, earliest online appearance dates, and EXIF/ELA forensics.\n"
+        "3️⃣ <b>Verify Audio / Voice Note:</b> Send audio files or Telegram voice notes to transcribe spoken speech (Whisper ASR) & verify news claims.\n\n"
         "Use /start to reset options anytime."
     )
 
@@ -170,19 +181,37 @@ async def handle_message(
             )
 
         # -----------------------------
-        # VOICE
+        # VOICE / AUDIO
         # -----------------------------
 
         elif message_type == MessageType.VOICE:
 
-            audio_path = await download_voice(
-                message,
-                context.bot
-            )
+            async def progress_cb(text: str):
+                try:
+                    await checking.edit_text(f"<b>Satya Analysis Engine</b>\n\n{text}", parse_mode="HTML")
+                except Exception:
+                    pass
 
-            result = await check_voice(
-                audio_path
-            )
+            audio_path = None
+            try:
+                if progress_cb:
+                    await progress_cb("🔍 Checking audio...")
+
+                audio_path = await download_voice(
+                    message,
+                    context.bot
+                )
+
+                result = await check_voice(
+                    audio_path,
+                    progress_callback=progress_cb
+                )
+            finally:
+                if audio_path and os.path.exists(audio_path):
+                    try:
+                        os.unlink(audio_path)
+                    except Exception:
+                        pass
 
         else:
 
@@ -254,6 +283,14 @@ async def button_handler(
         await query.message.reply_text(
             "🤖 <b>Option 2 Selected: Fake AI Image Detection</b>\n\n"
             "Please upload the photo or image you want to test for AI visual generation (SDXL / Midjourney / DALL-E).",
+            parse_mode="HTML"
+        )
+
+    elif query.data in ("mode_audio", "mode_voice"):
+        context.user_data["selected_mode"] = "audio"
+        await query.message.reply_text(
+            "🎤 <b>Option 3 Selected: Verify Audio / Voice Note</b>\n\n"
+            "Please send or forward the Telegram voice note or audio recording (MP3, WAV, OGG, M4A) you want to transcribe & verify.",
             parse_mode="HTML"
         )
 

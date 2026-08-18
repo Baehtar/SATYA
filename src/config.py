@@ -27,6 +27,7 @@ class Settings(BaseSettings):
 
     # ── Search ────────────────────────────────────────────────────────────────
     serpapi_key: str = Field(default="", description="SerpAPI key for Google Lens / web search")
+    google_vision_api_key: str = Field(default="", description="Google Cloud Vision API key")
     google_factcheck_api_key: str = Field(default="", description="Google Fact Check API key (free)")
 
     # ── App ───────────────────────────────────────────────────────────────────
