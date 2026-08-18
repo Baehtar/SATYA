@@ -115,14 +115,44 @@ def parse_lens_response(data: Dict[str, Any]) -> List[Dict[str, Any]]:
     return matches
 
 
-async def _call(params: Dict[str, Any], files: Any = None, timeout: float = 20.0) -> Dict[str, Any]:
+async def _call(params: Dict[str, Any], timeout: float = 20.0) -> Dict[str, Any]:
     async with httpx.AsyncClient(timeout=timeout) as client:
-        if files:
-            response = await client.post(SERPAPI_ENDPOINT, data=params, files=files)
-        else:
-            response = await client.get(SERPAPI_ENDPOINT, params=params)
+        response = await client.get(SERPAPI_ENDPOINT, params=params)
     response.raise_for_status()
     return response.json()
+
+
+SERPAPI_IMAGE_ENDPOINT = "https://serpapi.com/image"
+
+
+async def _upload_image(image_path: str, timeout: float = 20.0) -> str | None:
+    """
+    Uploads an image to SerpAPI and returns the image_id.
+    SerpAPI's file upload is a two-step process:
+      1. POST the file to /image → get an image_id
+      2. GET /search with engine=google_lens&image_id=...
+    """
+    try:
+        with open(image_path, "rb") as f:
+            image_bytes = f.read()
+
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(
+                SERPAPI_IMAGE_ENDPOINT,
+                data={"api_key": settings.serpapi_key},
+                files={"image": ("image.jpg", image_bytes, "image/jpeg")},
+            )
+        response.raise_for_status()
+        data = response.json()
+        image_id = data.get("image_id")
+        if not image_id:
+            log.warning("serpapi_upload_no_id", response=data)
+            return None
+        log.info("serpapi_image_uploaded", image_id=image_id)
+        return image_id
+    except Exception as e:
+        log.warning("serpapi_upload_failed", error=str(e))
+        return None
 
 
 async def search(
@@ -167,14 +197,21 @@ async def search(
                 timeout=timeout,
             )
         else:
-            # Opt-in direct upload for plans that support it.
+            # Two-step upload: POST image to /image, then search by image_id.
             log.info("serpapi_lens_direct_upload", path=image_path)
-            with open(image_path, "rb") as f:
-                data = await _call(
-                    {"engine": "google_lens", "api_key": settings.serpapi_key},
-                    files={"image_file": ("image.jpg", f.read(), "image/jpeg")},
-                    timeout=timeout,
-                )
+            image_id = await _upload_image(image_path, timeout=timeout)
+            if not image_id:
+                return {**unavailable, "error": "Failed to upload image to SerpAPI."}
+            data = await _call(
+                {
+                    "engine": "google_lens",
+                    "image_id": image_id,
+                    "api_key": settings.serpapi_key,
+                    "hl": "en",
+                    "country": "in",
+                },
+                timeout=timeout,
+            )
 
         if data.get("error"):
             log.warning("serpapi_lens_error", error=data["error"])
@@ -187,3 +224,4 @@ async def search(
     except Exception as e:
         log.warning("serpapi_lens_failed", error=str(e))
         return {**unavailable, "error": str(e)}
+
