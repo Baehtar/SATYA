@@ -5,22 +5,29 @@ Owned by: Person 4
 Serves trend data and a simple dashboard frontend.
 Run with: uvicorn src.dashboard.app:app --port 8080
 """
+from pathlib import Path
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse
 from sqlalchemy import select, func, text
-from src.db.database import AsyncSessionLocal
+from src.db.database import AsyncSessionLocal, init_db
 from src.db.models import ForwardCheck
 import json
 
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+
 app = FastAPI(title="Satya Trend Dashboard", version="1.0")
-app.mount("/static", StaticFiles(directory="src/dashboard/static"), name="static")
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
-@app.get("/", response_class=HTMLResponse)
+@app.on_event("startup")
+async def on_startup():
+    await init_db()
+
+
+@app.get("/", response_class=FileResponse)
 async def dashboard():
-    with open("src/dashboard/static/index.html") as f:
-        return f.read()
+    return FileResponse(STATIC_DIR / "index.html")
 
 
 @app.get("/api/stats")

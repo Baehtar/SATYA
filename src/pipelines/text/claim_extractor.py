@@ -71,8 +71,24 @@ async def extract_claim(text: str) -> Dict[str, Any]:
             )
 
             extracted: ClaimExtractionSchema = getattr(response, "parsed", None)
+            if (not extracted or not getattr(extracted, "claim", None)) and getattr(response, "text", None):
+                try:
+                    import json
+                    raw_json = response.text.strip()
+                    if raw_json.startswith("```json"):
+                        raw_json = raw_json[7:]
+                    if raw_json.startswith("```"):
+                        raw_json = raw_json[3:]
+                    if raw_json.endswith("```"):
+                        raw_json = raw_json[:-3]
+                    data = json.loads(raw_json.strip())
+                    extracted = ClaimExtractionSchema(**data)
+                except Exception as parse_err:
+                    log.warning("claim_extractor_json_parse_failed", error=str(parse_err))
+
             if not extracted or not getattr(extracted, "claim", None):
-                break
+                log.warning("claim_extractor_empty_response", raw_text=getattr(response, "text", "")[:200])
+                continue
 
             result = {
                 "original_text": original_text,
@@ -94,8 +110,11 @@ async def extract_claim(text: str) -> Dict[str, Any]:
             return result
 
         except Exception as e:
-            if ("429" in str(e) or "503" in str(e)) and attempt < 2:
-                await asyncio.sleep(2 * (attempt + 1))
+            err_msg = str(e).lower()
+            if ("429" in err_msg or "503" in err_msg or "quota" in err_msg or "resource_exhausted" in err_msg) and attempt < 3:
+                wait_time = 2.5 * (attempt + 1)
+                log.info("gemini_rate_limit_retry", wait_seconds=wait_time)
+                await asyncio.sleep(wait_time)
                 continue
             log.warning("gemini_claim_extraction_failed_fallback_used", error=str(e))
             break
