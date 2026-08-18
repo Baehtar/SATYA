@@ -35,6 +35,17 @@ DETECTED LANGUAGE CODE: {lang}
 Rules:
 - is_checkable = false ONLY for pure personal opinions, general greetings, or uncheckable predictions.
 - Always extract a clear factual proposition in English (and Hindi/Tamil if applicable).
+- Classify `claim_type` strictly into one of these categories:
+  * "government" (government schemes, official announcements, subsidies, laws, pensions, civic rules)
+  * "political" (elections, politicians, political parties, assemblies, speeches, policy disputes)
+  * "financial" (banking, money, RBI, scams, currency, UPI, investments, fines)
+  * "health" (medical advice, diseases, hospitals, cures, vaccines, food adulteration)
+  * "disaster" (fires, floods, earthquakes, accidents, weather emergencies)
+  * "crime" (police cases, arrests, thefts, violence, security advisories)
+  * "communal" (religious rumors, inter-community tensions)
+  * "science" (space, technology, astronomy, historical facts)
+  * "sport" (cricket, matches, tournaments, athletes)
+  * "other" (miscellaneous viral trivia)
 - Generate 3 compact search queries suitable for Google/Fact-check search.
 """
 

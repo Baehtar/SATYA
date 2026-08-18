@@ -189,7 +189,7 @@
           animation: { animateRotate: true, duration: 800 } }
       });
 
-      const cLabels = Object.keys(d.claim_type_distribution).map(k => k.charAt(0).toUpperCase()+k.slice(1));
+      const cLabels = Object.keys(d.claim_type_distribution).map(k => k.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()));
       const cData = Object.values(d.claim_type_distribution);
       if (claimChart) claimChart.destroy();
       claimChart = new Chart(document.getElementById('claimChart'), {
