@@ -6,6 +6,10 @@ fastapi>=0.95.0
 uvicorn[standard]>=0.30.0
 python-multipart>=0.0.9
 structlog>=23.1.0
+
+# Trend dashboard storage (src/db, src/dashboard)
+sqlmodel>=0.0.14
+aiosqlite>=0.19.0
 # tests/test_api.py and tests/test_judging_set.py are async
 pytest-asyncio>=0.23.0
 pydantic>=2.0.0

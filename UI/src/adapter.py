@@ -32,20 +32,19 @@ from google.genai import types
 from src.config import settings
 from src.models.schemas import Verdict
 from src.verdict.card_generator import fallback_explanations
+# The slug mapping is shared with the Telegram bot and the trend dashboard, so a
+# check logged from either front-end is the same kind of row.
+from src.verdict.normalize import (
+    AI_IMAGE_BORDERLINE,
+    AI_IMAGE_THRESHOLD,
+    AUTHENTIC_IMAGE,
+    MODE_AI_IMAGE,
+    MODE_FAKE_NEWS,
+    ai_score as _ai_score,
+    verdict_and_confidence as _verdict_and_confidence,
+)
 
 log = structlog.get_logger(__name__)
-
-# Same thresholds the bot and src/verdict/aggregator.py use: >= 0.70 is a call,
-# 0.45–0.70 is too close to call, below that is clean.
-AI_IMAGE_THRESHOLD = 0.70
-AI_IMAGE_BORDERLINE = 0.45
-
-MODE_FAKE_NEWS = "fake_news"
-MODE_AI_IMAGE = "ai_image"
-
-# Web-only slug: a decisive "no, this isn't AI" has no equivalent in the backend's
-# Verdict enum (which only ever talks about claims).
-AUTHENTIC_IMAGE = "authentic_image"
 
 
 def _ai_image_text(slug: str, score: float) -> Tuple[str, str]:
@@ -132,14 +131,6 @@ def _confidence_level(score: float) -> str:
     return "LOW"
 
 
-def _ai_score(result: Dict[str, Any]) -> float:
-    """check_mixed() nests its image result, so look one level down too."""
-    if result.get("image_ai_score") is not None:
-        return float(result["image_ai_score"])
-    nested = result.get("image") or {}
-    return float(nested.get("image_ai_score") or 0.0)
-
-
 def _sources(result: Dict[str, Any]) -> List[Dict[str, str]]:
     """ml_service emits {name, url, title, verdict}; the card wants source_*."""
     out: List[Dict[str, str]] = []
@@ -177,45 +168,6 @@ def _what_was_checked(result: Dict[str, Any], submitted_text: str) -> Tuple[str,
         return "Claim checked", submitted_text[:300]
 
     return "", ""
-
-
-# The only slugs the card may carry — anything else becomes "unverifiable"
-# rather than reaching the browser as an unrenderable verdict.
-WEB_VERDICTS = {v.value.lower() for v in Verdict}
-
-
-def _verdict_and_confidence(result: Dict[str, Any], mode: str) -> Tuple[str, float]:
-    backend_verdict = str(result.get("verdict") or "UNVERIFIABLE").upper()
-    if backend_verdict.lower() not in WEB_VERDICTS:
-        log.warning("unknown_backend_verdict", verdict=backend_verdict)
-        backend_verdict = "UNVERIFIABLE"
-    confidence = float(result.get("confidence") or 0.0)
-    ai_score = _ai_score(result)
-
-    # Dedicated AI-image check: answer that question and nothing else.
-    if mode == MODE_AI_IMAGE:
-        if backend_verdict == "UNVERIFIABLE":
-            return "unverifiable", confidence      # detector unavailable
-        if ai_score >= AI_IMAGE_THRESHOLD:
-            return "ai_generated", ai_score
-        if ai_score >= AI_IMAGE_BORDERLINE:
-            # Too close to call — don't hand back a clean bill of health.
-            return "unverifiable", 1.0 - ai_score
-        return AUTHENTIC_IMAGE, max(confidence, 1.0 - ai_score)
-
-    claim_was_checked = bool(result.get("extracted_claim")) or bool(result.get("sources"))
-
-    if result.get("type") == "image" and not claim_was_checked:
-        if ai_score >= AI_IMAGE_THRESHOLD:
-            return "ai_generated", ai_score
-        if backend_verdict == "UNVERIFIABLE":
-            # The detector itself could not run (missing HF key or API error) —
-            # report its own low confidence rather than implying an "authentic" call.
-            return "unverifiable", confidence
-        # Detector says the image looks authentic, but no claim was verified.
-        return "unverifiable", max(0.5, 1.0 - ai_score)
-
-    return backend_verdict.lower(), confidence
 
 
 def _provenance(result: Dict[str, Any]) -> Dict[str, Any]:

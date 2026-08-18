@@ -37,6 +37,10 @@
       display: flex; align-items: center; justify-content: center; font-size: 18px; }
     .logo h1 { font-size: 20px; font-weight: 700; letter-spacing: -0.5px; }
     .logo span { font-size: 12px; color: var(--muted); }
+    .header-right { display: flex; align-items: center; gap: 16px; }
+    .portal-link { color: var(--muted); text-decoration: none; font-size: 13px; font-weight: 600;
+      padding: 6px 14px; border: 1px solid var(--border); border-radius: 20px; transition: color 0.2s, border-color 0.2s; }
+    .portal-link:hover { color: var(--text); border-color: var(--accent); }
     .live-badge { background: rgba(76,239,154,0.15); color: var(--green); border: 1px solid rgba(76,239,154,0.3);
       padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: 600;
       display: flex; align-items: center; gap: 6px; }
@@ -87,6 +91,7 @@
     .badge-ai_generated { background: rgba(108,99,255,0.15); color: var(--accent); }
     .badge-manipulated { background: rgba(255,101,132,0.15); color: var(--accent2); }
     .badge-misleading_context { background: rgba(255,140,0,0.15); color: #ff8c00; }
+    .badge-authentic_image { background: rgba(76,239,154,0.15); color: var(--green); }
     .feed-claim { font-size: 13px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .feed-type { font-size: 11px; color: var(--muted); }
     .feed-latency { font-size: 11px; color: var(--muted); white-space: nowrap; }
@@ -107,7 +112,10 @@
         <span>AI Misinformation Forward-Checker</span>
       </div>
     </div>
-    <div class="live-badge"><div class="live-dot"></div> LIVE</div>
+    <div class="header-right">
+      <a class="portal-link" href="/">&larr; Check a forward</a>
+      <div class="live-badge"><div class="live-dot"></div> LIVE</div>
+    </div>
   </header>
 
   <main>
@@ -150,13 +158,14 @@
   <script>
     const VERDICT_COLORS = {
       likely_false: '#ef476f', likely_true: '#4cef9a', unverifiable: '#ffd166',
-      ai_generated: '#6c63ff', manipulated: '#ff6584', misleading_context: '#ff8c00'
+      ai_generated: '#6c63ff', manipulated: '#ff6584', misleading_context: '#ff8c00',
+      authentic_image: '#4cef9a'
     };
 
     let verdictChart, claimChart;
 
     async function fetchStats() {
-      const r = await fetch('/api/stats');
+      const r = await fetch('/api/dashboard/stats');
       const d = await r.json();
       document.getElementById('total').textContent = d.total_checks.toLocaleString();
       document.getElementById('false-count').textContent = d.likely_false.toLocaleString();
@@ -165,7 +174,7 @@
     }
 
     async function fetchTrends() {
-      const r = await fetch('/api/trends');
+      const r = await fetch('/api/dashboard/trends');
       const d = await r.json();
 
       const vLabels = Object.keys(d.verdict_distribution).map(k => k.replace(/_/g,' '));
@@ -198,7 +207,7 @@
     }
 
     async function fetchFeed() {
-      const r = await fetch('/api/recent?limit=15');
+      const r = await fetch('/api/dashboard/recent?limit=15');
       const items = await r.json();
       const feed = document.getElementById('feed');
       if (!items.length) { feed.innerHTML = '<p style="color:var(--muted);font-size:13px;">No checks yet. Send a forward to the bot!</p>'; return; }
@@ -206,7 +215,7 @@
         <div class="feed-item">
           <span class="verdict-badge badge-${item.verdict}">${item.verdict.replace(/_/g,' ')}</span>
           <span class="feed-claim">${item.claim || 'Image / Voice / Screenshot'}</span>
-          <span class="feed-type">${item.message_type}</span>
+          <span class="feed-type">${item.message_type.replace(/_/g,' ')}</span>
           <span class="feed-latency">${(item.latency_ms/1000).toFixed(1)}s</span>
         </div>
       `).join('');

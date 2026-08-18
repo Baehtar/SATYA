@@ -76,6 +76,7 @@ async def check_text(text: str, progress_callback=None):
             "explanation": explanation,
             "sources": sources,
             "extracted_claim": analysis.extracted_claim,
+            "claim_type": analysis.claim_type.value if hasattr(analysis.claim_type, "value") else str(analysis.claim_type),
             "language": analysis.language.value if hasattr(analysis.language, "value") else str(analysis.language)
         }
 
@@ -411,6 +412,7 @@ async def check_image(image_path: str, progress_callback=None, mode: str = None,
         "confidence": conf_score,
         "confidence_level": conf_level,
         "extracted_claim": extracted_claim,
+        "claim_type": text_analysis.claim_type.value if hasattr(text_analysis.claim_type, "value") else str(text_analysis.claim_type),
         "explanation": _with_provenance(explanation, provenance),
         "image_ai_score": image_ai_score,
         "provenance": provenance,
@@ -562,5 +564,9 @@ async def check_mixed(image_path: str, caption: str, progress_callback=None):
         "text": text_result,
         "provenance": provenance,
         "image_ai_score": image_result.get("image_ai_score", 0.0),
+        # The caption is the claim here, so its topic and text are the ones
+        # that describe this check.
+        "extracted_claim": text_result.get("extracted_claim", ""),
+        "claim_type": text_result.get("claim_type", "other"),
         "sources": sources,
     }
