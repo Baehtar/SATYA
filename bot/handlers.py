@@ -2,7 +2,6 @@ import os
 import time
 import uuid
 
-
 from services.ml_service import (
     check_text,
     check_image,
@@ -19,6 +18,7 @@ from telegram import (
 from telegram.ext import (
     CommandHandler,
     MessageHandler,
+    CallbackQueryHandler,
     ContextTypes,
     filters
 )
@@ -29,6 +29,7 @@ from bot.router import (
 )
 
 from bot.response import format_verdict
+from UI.src.adapter import build_card
 
 from utils.telegram_files import (
     download_photo,
@@ -130,12 +131,7 @@ async def _log_to_dashboard(
     user_id: int,
     mode: str = None
 ):
-    """Records the check on the trend dashboard (/dashboard on the web portal).
-
-    The bot's "audio" mode is a routing choice, not a verdict mode — only the
-    dedicated AI-image check changes how a result is read, so anything else is
-    logged as an ordinary claim check.
-    """
+    """Records the check on the trend dashboard (/dashboard on the web portal)."""
     if not TREND_LOGGING:
         return
 
@@ -153,7 +149,6 @@ async def handle_message(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
-
     message = update.effective_message
 
     if not message:
@@ -164,12 +159,9 @@ async def handle_message(
     )
 
     if message_type == MessageType.UNSUPPORTED:
-
         await message.reply_text(
-            "❌ Sorry, I don't support this "
-            "type of content yet."
+            "❌ Sorry, I don't support this type of content yet."
         )
-
         return
 
     checking = await message.reply_text(
@@ -182,13 +174,10 @@ async def handle_message(
     started_at = time.monotonic()
 
     try:
-
         # -----------------------------
         # TEXT
         # -----------------------------
-
         if message_type == MessageType.TEXT:
-
             result = await check_text(
                 message.text
             )
@@ -196,9 +185,7 @@ async def handle_message(
         # -----------------------------
         # IMAGE
         # -----------------------------
-
         elif message_type == MessageType.IMAGE:
-
             async def progress_cb(text: str, step: str = ""):
                 try:
                     await checking.edit_text(f"<b>Satya Analysis Engine</b>\n\n{text}", parse_mode="HTML")
@@ -221,9 +208,7 @@ async def handle_message(
         # -----------------------------
         # IMAGE + CAPTION
         # -----------------------------
-
         elif message_type == MessageType.IMAGE_WITH_CAPTION:
-
             image_path = await download_photo(
                 message,
                 context.bot
@@ -237,10 +222,8 @@ async def handle_message(
         # -----------------------------
         # VOICE / AUDIO
         # -----------------------------
-
         elif message_type == MessageType.VOICE:
-
-            async def progress_cb(text: str):
+            async def progress_cb(text: str, step: str = ""):
                 try:
                     await checking.edit_text(f"<b>Satya Analysis Engine</b>\n\n{text}", parse_mode="HTML")
                 except Exception:
@@ -268,7 +251,6 @@ async def handle_message(
                         pass
 
         else:
-
             result = {
                 "verdict": "UNVERIFIABLE",
                 "confidence": 0.0,
@@ -278,7 +260,6 @@ async def handle_message(
         # -----------------------------
         # LOG TO THE TREND DASHBOARD
         # -----------------------------
-
         await _log_to_dashboard(
             result,
             request_id=request_id,
@@ -289,11 +270,21 @@ async def handle_message(
         )
 
         # -----------------------------
-        # FORMAT RESULT
+        # BUILD GRANDPARENT-FRIENDLY BILINGUAL CARD
         # -----------------------------
+        try:
+            sub_text = message.text or message.caption or result.get("extracted_claim", "")
+            card = await build_card(
+                result,
+                submitted_text=sub_text,
+                mode=context.user_data.get("selected_mode", "fake_news"),
+            )
+        except Exception as card_err:
+            print(f"Bilingual card generation fallback: {card_err}")
+            card = result
 
         response = format_verdict(
-            result
+            card
         )
 
         keyboard = InlineKeyboardMarkup(
@@ -318,11 +309,9 @@ async def handle_message(
         )
 
     except Exception as error:
-
         print(
             f"Error processing message: {error}"
         )
-
         await checking.edit_text(
             "❌ <b>Something went wrong.</b>\n\n"
             "Please try again.",
@@ -379,7 +368,6 @@ async def button_handler(
 
 
 def register_handlers(application):
-
     application.add_handler(
         CommandHandler(
             "start",
