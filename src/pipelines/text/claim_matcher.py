@@ -38,19 +38,18 @@ NEWS AND FACT-CHECK ARTICLES FOUND:
 {fact_checks}
 
 Instructions:
-1. For each article, evaluate semantic equivalence:
-   - Does this article address the EXACT SAME event, person, statement, or quote?
-   - Evaluate: Who, What happened, When, Where, How much, To whom?
-   - Assign match_confidence (0.0 to 1.0). > 0.70 means direct match.
+1. For each article, evaluate semantic relevance:
+   - Does this article address this specific claim, rumor, viral forward, or hoax (even if the headline refutes or debunks it)?
+   - Articles from fact-checkers (PIB, Alt News, BOOM, Google FactCheck) or news organizations discussing and refuting this viral claim are direct matches (match_confidence 0.75 - 0.95).
 2. Determine overall verdict:
-   - "likely_true": Credible news coverage or fact-checks confirm this event/claim actually occurred or is factual.
-   - "likely_false": Credible fact-checks or news coverage explicitly debunk or refute this claim as false/fabricated.
-   - "unverifiable": No confident matches (>0.50), weak evidence, or conflicting reports.
+   - "likely_true": Credible news coverage, official government notices, or fact-checks confirm this event/claim actually occurred or is true.
+   - "likely_false": Credible fact-checks, official government statements (PIB), or investigative reporting confirm this claim is false, fabricated, a known hoax, a fake scheme, or a viral rumor.
+   - "unverifiable": Pure personal hearsay, hyper-local rumors with zero public coverage, or ambiguous conflicting reports.
 
 CRITICAL RULES:
-- If multiple mainstream news outlets report the exact event as reported news, return "likely_true" with high confidence (0.85-0.95).
-- If credible fact-checks explicitly debunk the claim, return "likely_false" with high confidence (0.85-0.95).
-- Absence of evidence means UNVERIFIABLE.
+- If search results include fact-checks or reports debunking the viral rumor (e.g., vaccine microchips, fake cash deposits, fake PM stipend, ATM closures), return "likely_false" with confidence 0.85-0.95.
+- If mainstream news outlets report the exact event as verified factual news (e.g., historical facts, official laws), return "likely_true" with confidence 0.85-0.95.
+- Genuine absence of any coverage for local/vague personal claims means "unverifiable".
 """
 
 
@@ -133,15 +132,31 @@ async def match_and_summarise(
             )
 
             match_res: ClaimMatchSchema = getattr(response, "parsed", None)
+            if not match_res and getattr(response, "text", None):
+                try:
+                    import json
+                    raw_json = response.text.strip()
+                    if raw_json.startswith("```json"):
+                        raw_json = raw_json[7:]
+                    if raw_json.startswith("```"):
+                        raw_json = raw_json[3:]
+                    if raw_json.endswith("```"):
+                        raw_json = raw_json[:-3]
+                    data = json.loads(raw_json.strip())
+                    match_res = ClaimMatchSchema(**data)
+                except Exception as parse_err:
+                    log.warning("claim_matcher_json_parse_fallback_failed", error=str(parse_err))
+
             if not match_res:
-                break
+                log.warning("claim_matcher_no_parsed_response", raw_text=getattr(response, "text", "")[:200])
+                continue
 
             updated_matches = []
             for m_result in match_res.matches:
                 idx = m_result.index
                 if idx < len(matches):
                     conf = float(m_result.match_confidence)
-                    if conf >= 0.40:
+                    if conf >= 0.25:
                         m = matches[idx].model_copy(update={
                             "match_confidence": conf,
                             "fact_check_verdict": m_result.verdict_extracted,
@@ -163,7 +178,7 @@ async def match_and_summarise(
                 verdict = Verdict.UNVERIFIABLE
 
             confidence = float(match_res.overall_confidence)
-            if confidence < 0.50 or not updated_matches:
+            if confidence < 0.50 or (not updated_matches and not matches):
                 verdict = Verdict.UNVERIFIABLE
 
             return ClaimAnalysis(
@@ -183,8 +198,11 @@ async def match_and_summarise(
             )
 
         except Exception as e:
-            if ("429" in str(e) or "503" in str(e)) and attempt < 2:
-                await asyncio.sleep(2 * (attempt + 1))
+            err_msg = str(e).lower()
+            if ("429" in err_msg or "503" in err_msg or "quota" in err_msg or "resource_exhausted" in err_msg) and attempt < 3:
+                wait_time = 2.5 * (attempt + 1)
+                log.info("gemini_matcher_rate_limit_retry", wait_seconds=wait_time)
+                await asyncio.sleep(wait_time)
                 continue
             log.error("semantic_claim_matching_failed", error=str(e))
             return ClaimAnalysis(
