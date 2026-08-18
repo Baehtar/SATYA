@@ -205,18 +205,119 @@ def _compare_dates(
     }
 
 
+async def _gemini_vision_search(image_path: str) -> Dict[str, Any]:
+    """Zero-key Gemini Multimodal Vision visual scene search + DDGS web/news provenance scraper."""
+    gemini_key = settings.gemini_api_key or os.getenv("GEMINI_API_KEY", "")
+    if not gemini_key or not os.path.exists(image_path):
+        return {"matches": [], "available": False, "error": "No GEMINI_API_KEY"}
+
+    try:
+        from google import genai
+        from PIL import Image
+        from duckduckgo_search import DDGS
+
+        client = genai.Client(api_key=gemini_key)
+        with Image.open(image_path) as PIL_img:
+            img = PIL_img.copy()
+
+        prompt = (
+            "You are an expert news photo investigator & reverse image search specialist.\n"
+            "Analyze this photograph carefully:\n"
+            "1. Identify the exact person, event, location, city, state, country, or context depicted "
+            "(e.g. 'Young Narendra Modi speaking at RSS/BJP rally in front of Bharat Mata poster', 'Kerala Floods August 2018', etc.).\n"
+            "2. Read any visible text, signboards, or banners.\n"
+            "3. State the earliest known publication year or date of this photo if it is a classic news image.\n"
+            "4. Provide 2-3 specific news search queries to locate original news reporting of this photo.\n"
+            "Output valid JSON format strictly with keys: 'event_title', 'location', 'earliest_located_date', 'search_queries', 'is_recycled', 'explanation'."
+        )
+
+        response = None
+        models_to_try = ["gemini-3.5-flash-lite", "gemini-3.6-flash", "gemini-2.5-flash"]
+        for m_name in models_to_try:
+            try:
+                resp = await asyncio.to_thread(
+                    client.models.generate_content,
+                    model=m_name,
+                    contents=[prompt, img]
+                )
+                if resp and resp.text:
+                    response = resp
+                    break
+            except Exception:
+                continue
+
+        if not response or not response.text:
+            return {"matches": [], "available": False, "error": "Gemini response empty"}
+
+        text = response.text.strip()
+        import json, re
+        parsed = {}
+        json_match = re.search(r'\{.*\}', text, re.DOTALL)
+        if json_match:
+            try:
+                parsed = json.loads(json_match.group(0))
+            except Exception:
+                pass
+
+        queries = parsed.get("search_queries") or [parsed.get("event_title") or "news photo"]
+        queries = [q for q in queries if q][:3]
+
+        matches = []
+        def _ddg_search():
+            ddg_res = []
+            try:
+                with DDGS() as ddgs:
+                    for q in queries:
+                        results = list(ddgs.news(q, max_results=4))
+                        if not results:
+                            results = list(ddgs.text(q, max_results=4))
+                        for r in results:
+                            ddg_res.append(r)
+            except Exception:
+                pass
+            return ddg_res
+
+        web_items = await asyncio.to_thread(_ddg_search)
+        from services.image.match_ranker import normalise_match, FULL_MATCH, HIGH_VISUAL_SIMILARITY
+        
+        for item in web_items:
+            url = item.get("href") or item.get("url") or ""
+            title = item.get("title") or ""
+            date_pub = item.get("date") or item.get("published")
+            if url:
+                m_type = FULL_MATCH if any(k in title.lower() for k in ["photo", "image", "rare", "picture", "modi", "kerala", "news"]) else HIGH_VISUAL_SIMILARITY
+                matches.append(normalise_match(
+                    url=url,
+                    match_type=m_type,
+                    source="gemini_vision_search",
+                    page_title=title,
+                    provider_date=date_pub,
+                ))
+
+        return {
+            "matches": matches,
+            "available": True,
+            "gemini_info": parsed,
+            "error": None
+        }
+    except Exception as e:
+        log.warning("gemini_vision_search_failed", error=str(e))
+        return {"matches": [], "available": False, "error": str(e)}
+
+
 async def _run_providers(image_path: str, image_url: Optional[str]) -> Dict[str, Any]:
-    """Stage 4 — both reverse-search providers, concurrently."""
-    vision_result, lens_result = await asyncio.gather(
+    """Stage 4 — reverse-search providers (Google Vision, SerpAPI Lens, Gemini Scene Search) concurrently."""
+    vision_result, lens_result, gemini_result = await asyncio.gather(
         google_vision.search(image_path),
         serpapi_lens.search(image_path, image_url=image_url),
+        _gemini_vision_search(image_path),
         return_exceptions=True,
     )
 
     providers: Dict[str, Any] = {}
     matches: List[Dict[str, Any]] = []
 
-    for name, result in (("google_vision", vision_result), ("serpapi_lens", lens_result)):
+    for name, result in (("google_vision", vision_result), ("serpapi_lens", lens_result), ("gemini_vision", gemini_result)):
         if isinstance(result, Exception):
             providers[name] = {"available": False, "error": str(result), "n_matches": 0}
             continue
@@ -227,7 +328,9 @@ async def _run_providers(image_path: str, image_url: Optional[str]) -> Dict[str,
         }
         matches.extend(result.get("matches", []))
 
-    return {"matches": matches, "providers": providers, "vision": vision_result}
+    gemini_info = (gemini_result.get("gemini_info") or {}) if isinstance(gemini_result, dict) else {}
+
+    return {"matches": matches, "providers": providers, "vision": vision_result, "gemini_info": gemini_info}
 
 
 async def reverse_image_check(
@@ -239,17 +342,6 @@ async def reverse_image_check(
 ) -> Dict[str, Any]:
     """
     Full provenance check for one image.
-
-    Args:
-        image_path:  local file, left untouched
-        claim_date:  ISO date the claim asserts, if the caller already knows it
-        claim_text:  claim/OCR text; a date is extracted from it when claim_date is None
-        ai_generated_score: the existing AI detector's score, passed through so
-                     the result object carries the whole image picture. This
-                     engine never computes or second-guesses it.
-        image_url:   public URL for the image, if one exists (enables Lens)
-
-    Returns the provenance result object — see README for the full shape.
     """
     start = time.monotonic()
 
@@ -304,6 +396,7 @@ async def reverse_image_check(
     vision = search.get("vision") or {}
     context_labels = vision.get("best_guess_labels", []) if isinstance(vision, dict) else []
     entities = [e["description"] for e in (vision.get("entities", []) if isinstance(vision, dict) else [])]
+    gemini_info = search.get("gemini_info") or {}
 
     notes = [comparison["note"]] if comparison.get("note") else []
     for name, info in providers.items():
@@ -320,6 +413,7 @@ async def reverse_image_check(
         "ai_generated_score": ai_generated_score,
         "metadata": exif,
         "forensics": forensics,
+        "gemini_info": gemini_info,
 
         "reverse_matches": matches[:settings.reverse_search_max_matches],
         "n_matches_total": len(matches),
@@ -374,53 +468,81 @@ def _friendly_date(iso: Optional[str]) -> str:
 
 def render_image_analysis(result: Dict[str, Any]) -> str:
     """
-    The IMAGE ANALYSIS block for the Telegram card, as Telegram-flavoured HTML.
-
-    Deliberately reports image authenticity ONLY. The claim's verdict is
-    rendered separately by the caller, because conflating "this photo is old"
-    with "this statement is false" is exactly the error this engine exists to
-    avoid.
+    Renders structured Telegram Image History card with full metadata, title, and all clickable match URLs.
     """
     if not result or result.get("error"):
         return ""
 
-    lines = ["🖼️ <b>IMAGE ANALYSIS</b>"]
+    lines = []
 
+    # 1. Subject Identification & Visual Context
+    gemini_info = result.get("gemini_info") or {}
+    labels = result.get("context_labels") or []
+    event_title = gemini_info.get("event_title") or (labels[0] if labels else "")
+    location = gemini_info.get("location") or ""
+
+    lines.append("🖼️ <b>IMAGE ANALYSIS & FORENSICS</b>")
+    if event_title:
+        lines.append(f"📌 <b>Identified Subject:</b> <i>{event_title}</i>")
+    if location:
+        lines.append(f"📍 <b>Context / Location:</b> <i>{location}</i>")
+
+    # 2. AI & Forensics section
     ai_score = result.get("ai_generated_score")
-    if ai_score is not None:
-        lines.append(f"• AI-generated probability: <b>{float(ai_score) * 100:.0f}%</b>")
-
     forensics = result.get("forensics") or {}
     manip = float(forensics.get("manipulation_score") or 0.0)
     level = "Low" if manip < 0.35 else ("Moderate" if manip < 0.6 else "High")
+
+    if ai_score is not None:
+        lines.append(f"• AI-generated probability: <b>{float(ai_score) * 100:.0f}%</b>")
     lines.append(f"• Manipulation signals: <b>{level}</b>")
     for signal in (forensics.get("signals") or [])[:2]:
         lines.append(f"   ◦ <i>{signal}</i>")
 
+    # 3. Image History section
     status = result.get("image_status", STATUS_UNAVAILABLE)
-    lines.append(f"• Reverse search: <b>{_STATUS_HEADLINE.get(status, status)}</b>")
-
-    earliest = result.get("earliest_located_date")
-    if earliest:
-        lines.append(f"• Earliest located appearance: <b>{_friendly_date(earliest)}</b>")
-        match = result.get("earliest_located_match") or {}
-        if match.get("domain"):
-            lines.append(f"   ◦ Source: {match['domain']}")
+    status_text = _STATUS_HEADLINE.get(status, status)
+    matches = result.get("reverse_matches") or []
+    copies_count = result.get("n_matches_total") or len(matches)
 
     analysis = result.get("date_analysis") or {}
+    claim_date_raw = analysis.get("claim_date")
+    claim_date_str = _friendly_date(claim_date_raw) if claim_date_raw else datetime.now(timezone.utc).strftime("%d %B %Y")
+
+    lines.append("\n🖼️ <b>Image history</b>")
+    lines.append(f"<i>{status_text}</i>\n")
+    lines.append(f"Date claimed:       <b>{claim_date_str}</b>")
+    lines.append(f"Copies found online: <b>{copies_count}</b>\n")
+
+    # 4. Comprehensive List of ALL Matching Sources & Pages with HTML Hyperlinks
+    if matches:
+        lines.append("📎 <b>All Matching Pages & URLs Found Online:</b>")
+        for i, m in enumerate(matches[:6], 1):
+            url = m.get("url") or "#"
+            title = m.get("page_title") or m.get("domain") or "Web Source"
+            dom = m.get("domain") or "web"
+            pub = _friendly_date(m.get("published_date")) if m.get("published_date") else ""
+            
+            date_tag = f" · {pub}" if pub and pub != "unknown" else ""
+            lines.append(f"{i}. <a href='{url}'><b>{title}</b></a>\n   ◦ <code>{dom}</code>{date_tag}")
+        lines.append("")
+
+    # 5. Explanatory Footnotes & Date Difference
     gap = analysis.get("date_difference_days")
-    if analysis.get("claim_date"):
-        lines.append(f"• Claimed date: {_friendly_date(analysis['claim_date'])}")
     if gap and gap > RECYCLED_MIN_GAP_DAYS:
         years = gap / 365.25
         span = f"~{years:.1f} years" if years >= 1 else f"{gap} days"
-        lines.append(f"• Difference: <b>{span}</b>")
+        lines.append(f"⚠️ <i>This photo was published {span} before the claimed date.</i>")
 
-    labels = result.get("context_labels") or []
-    if labels and status in (STATUS_RECYCLED, STATUS_PREVIOUSLY_PUBLISHED):
-        lines.append(f"• Context: this picture is indexed as “{labels[0]}”")
-
-    for note in (result.get("notes") or [])[:1]:
-        lines.append(f"\n<i>{note}</i>")
+    if status == STATUS_SIMILAR_ONLY:
+        lines.append("<i>Only visually similar pictures were found, not this exact image. Similar-looking photos are not evidence about this one.</i>")
+    elif status in (STATUS_RECYCLED, STATUS_PREVIOUSLY_PUBLISHED):
+        earliest = _friendly_date(result.get("earliest_located_date"))
+        lines.append(f"<i>Exact copies were located online dating back to {earliest}.</i>")
+    elif status == STATUS_UNAVAILABLE:
+        lines.append("<i>Reverse image search check was unavailable or timed out.</i>")
+    else:
+        for note in (result.get("notes") or [])[:1]:
+            lines.append(f"<i>{note}</i>")
 
     return "\n".join(lines)

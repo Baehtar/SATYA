@@ -36,7 +36,7 @@ from services.image.match_ranker import (
 
 log = structlog.get_logger(__name__)
 
-SERPAPI_ENDPOINT = "https://serpapi.com/search"
+SERPAPI_ENDPOINT = "https://serpapi.com/search.json"
 
 PROVIDER = "serpapi_lens"
 
@@ -45,8 +45,13 @@ MAX_VISUAL_MATCHES = 12
 HIGH_SIMILARITY_CUTOFF = 5
 
 
+def get_api_key() -> str:
+    key = settings.serpapi_key or settings.serp_api_key or os.getenv("SERP_API_KEY", "") or os.getenv("SERPAPI_KEY", "")
+    return key.strip()
+
+
 def is_configured() -> bool:
-    return is_real_key(settings.serpapi_key)
+    return is_real_key(get_api_key())
 
 
 def public_url_for(image_path: str) -> Optional[str]:
@@ -125,56 +130,60 @@ async def _call(params: Dict[str, Any], files: Any = None, timeout: float = 20.0
     return response.json()
 
 
+async def _upload_to_catbox(image_path: str) -> Optional[str]:
+    """Uploads local image to Catbox free image host to get a public URL for Google Lens."""
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            with open(image_path, "rb") as f:
+                response = await client.post(
+                    "https://catbox.moe/user/api.php",
+                    data={"reqtype": "fileupload"},
+                    files={"fileToUpload": ("image.jpg", f, "image/jpeg")}
+                )
+                if response.status_code == 200 and response.text.startswith("http"):
+                    return response.text.strip()
+    except Exception as e:
+        log.warning("catbox_upload_failed", error=str(e))
+    return None
+
+
 async def search(
     image_path: str,
     image_url: Optional[str] = None,
     timeout: float | None = None,
 ) -> Dict[str, Any]:
     """
-    Runs Google Lens for the image.
-    Returns {matches, available, error}. `available=False` means the provider
-    never ran — usually because no public image URL exists, which is not a
-    finding about the image.
+    Runs Google Lens for the image via SerpAPI.
+    Uses public URL or uploads to Catbox free host to generate a public URL.
     """
     unavailable: Dict[str, Any] = {"matches": [], "available": False}
-    timeout = timeout or settings.reverse_search_timeout
+    timeout = timeout or 35.0
 
     if not is_configured():
         return {**unavailable, "error": "SERPAPI_KEY is not configured."}
 
     url = image_url or public_url_for(image_path)
+    if not url:
+        url = await _upload_to_catbox(image_path)
 
-    if not url and not settings.serpapi_lens_allow_upload:
+    if not url:
         return {
             **unavailable,
-            "error": (
-                "Google Lens needs a publicly reachable image URL. Set "
-                "PUBLIC_IMAGE_BASE_URL (or SERPAPI_LENS_ALLOW_UPLOAD=true) to enable it. "
-                "Both publish the user's image to a third party — Google Vision does not."
-            ),
+            "error": "Could not generate public image URL for Google Lens.",
         }
 
     try:
-        if url:
-            data = await _call(
-                {
-                    "engine": "google_lens",
-                    "url": url,
-                    "api_key": settings.serpapi_key,
-                    "hl": "en",
-                    "country": "in",
-                },
-                timeout=timeout,
-            )
-        else:
-            # Opt-in direct upload for plans that support it.
-            log.info("serpapi_lens_direct_upload", path=image_path)
-            with open(image_path, "rb") as f:
-                data = await _call(
-                    {"engine": "google_lens", "api_key": settings.serpapi_key},
-                    files={"image_file": ("image.jpg", f.read(), "image/jpeg")},
-                    timeout=timeout,
-                )
+        api_k = get_api_key()
+        data = await _call(
+            {
+                "engine": "google_lens",
+                "url": url,
+                "api_key": api_k,
+                "hl": "en",
+                "country": "in",
+            },
+            timeout=timeout,
+        )
 
         if data.get("error"):
             log.warning("serpapi_lens_error", error=data["error"])

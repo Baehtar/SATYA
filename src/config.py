@@ -38,18 +38,18 @@ class Settings(BaseSettings):
 
     # ── Search ────────────────────────────────────────────────────────────────
     serpapi_key: str = Field(default="", description="SerpAPI key for Google Lens / web search")
+    serp_api_key: str = Field(default="", description="SerpAPI key alias")
     google_vision_api_key: str = Field(default="", description="Google Cloud Vision API key")
     google_factcheck_api_key: str = Field(default="", description="Google Fact Check API key (free)")
 
     # ── Reverse image search / provenance ─────────────────────────────────────
-    google_vision_api_key: str = Field(default="", description="Google Cloud Vision API key — primary reverse search (accepts local files)")
     reverse_search_enabled: bool = Field(default=True, description="Master switch for the provenance engine")
     reverse_search_timeout: int = Field(default=20, description="Per-provider reverse search timeout (seconds)")
     reverse_search_max_matches: int = Field(default=10, description="Matches kept in the result object")
     date_extraction_max_pages: int = Field(default=8, description="How many matching pages to fetch for dates")
     page_fetch_timeout: int = Field(default=10, description="Timeout when fetching a matching page (seconds)")
-    public_image_base_url: str = Field(default="", description="Public base URL where submitted images are reachable — REQUIRED for SerpAPI Lens, which publishes the image to a third party")
-    serpapi_lens_allow_upload: bool = Field(default=False, description="Allow uploading the user's image directly to SerpAPI (privacy-sensitive, off by default)")
+    public_image_base_url: str = Field(default="", description="Public base URL where submitted images are reachable")
+    serpapi_lens_allow_upload: bool = Field(default=True, description="Allow uploading the user's image directly to SerpAPI")
 
     # ── App ───────────────────────────────────────────────────────────────────
     debug: bool = False
