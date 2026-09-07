@@ -20,11 +20,12 @@
     <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🔍</text></svg>">
     
     <script>
-        // Prevent flash of wrong theme — always set an explicit data-theme
+        // Prevent flash of wrong theme by painting the first view in light mode.
         (function() {
-            var t = localStorage.getItem('satya-theme');
-            if (!t) t = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-            document.documentElement.setAttribute('data-theme', t);
+            document.documentElement.setAttribute('data-theme', 'light');
+            try {
+                localStorage.setItem('satya-theme', 'light');
+            } catch (e) {}
         })();
 
         function toggleTheme() {
