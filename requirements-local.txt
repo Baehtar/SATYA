@@ -1,0 +1,18 @@
+-r requirements.txt
+
+# Test tooling.
+pytest-asyncio>=0.23.0
+
+# Local OCR fallback. The Vercel deployment uses Gemini Vision instead.
+easyocr>=1.7.0
+
+# Hugging Face local models (image AI detector, local Whisper service).
+transformers>=4.36.0
+huggingface_hub
+accelerate
+
+# Audio processing and local voice analysis.
+librosa
+
+# Only needed when WHISPER_BACKEND=local.
+# openai-whisper>=20231117
