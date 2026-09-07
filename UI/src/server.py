@@ -22,6 +22,7 @@ import json
 import logging
 import os
 import shutil
+import tempfile
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -55,7 +56,10 @@ log = structlog.get_logger(__name__)
 # Paths are resolved from this file, so the server works from any CWD.
 UI_DIR = Path(__file__).resolve().parent.parent
 FRONTEND_DIR = UI_DIR / "frontend"
-UPLOAD_DIR = UI_DIR / "uploads"
+UPLOAD_DIR = Path(
+    os.getenv("SATYA_UPLOAD_DIR")
+    or (Path(tempfile.gettempdir()) / "satya-uploads" if os.getenv("VERCEL") else UI_DIR / "uploads")
+)
 
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 MAX_AUDIO_BYTES = 25 * 1024 * 1024
